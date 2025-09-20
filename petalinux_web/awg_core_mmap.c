@@ -240,19 +240,15 @@ int awg_send_hex4(const char *idxA_hex, const char *gainA_hex,
     return 0;
 }
 
-// 極速版：直接吃 32 個 32-bit words（已經是正確格式的 index/gain words）
-// 由本函式在結尾自動送一次 commit
+// Flexible version: stream exactly "count" words (caller decides commit)
 int awg_send_words32(const uint32_t *words32, int count)
 {
     if (!g_data_regs || !g_wen_regs) return -1;
-    if (!words32 || count != 32)   return -2;   // 固定 32 筆（A: idx8+gain8, B: idx8+gain8）
+    if (!words32 || count <= 0) return -2;
 
-    for (int i = 0; i < 32; ++i) {
+    for (int i = 0; i < count; ++i) {
         write_word32(words32[i]);
         wen_edge(DEF_WEN_ACTHI, DEF_WEN_US);
     }
-    // 一次性 commit
-    write_word32(make_commit_word());
-    wen_edge(DEF_WEN_ACTHI, DEF_WEN_US);
     return 0;
 }
