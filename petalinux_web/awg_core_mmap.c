@@ -244,7 +244,7 @@ int awg_send_hex4(const char *idxA_hex, const char *gainA_hex,
 // 由本函式在結尾自動送一次 commit
 int awg_send_words32(const uint32_t *words32, int count)
 {
-    if (!g_data_req || !g_wen_req) return -1;
+    if (!g_data_regs || !g_wen_regs) return -1;
     if (!words32 || count != 32)   return -2;   // 固定 32 筆（A: idx8+gain8, B: idx8+gain8）
 
     for (int i = 0; i < 32; ++i) {
