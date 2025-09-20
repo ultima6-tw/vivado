@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>雙 RGB LED 控制 (vanilla JS)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { --card:#f7f7f7; --bd:#ddd; --txt:#222; }
+    body { font-family: system-ui, sans-serif; color:var(--txt); padding:16px; }
+    fieldset { border:1px solid var(--bd); border-radius:10px; padding:12px; margin:12px 0; }
+    legend { padding:0 .4rem; }
+    .row { display:flex; flex-wrap:wrap; gap:.5rem .75rem; align-items:center; margin:.5rem 0; }
+    .chip { width: 14ch; }
+    .btn { padding:.5rem .8rem; border:1px solid #888; border-radius:8px; background:#fff; cursor:pointer; }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    label.switch { display:inline-flex; gap:.45rem; align-items:center; }
+    input[type="checkbox"] { width:18px; height:18px; }
+    #resp { white-space:pre-wrap; background:var(--card); border:1px solid var(--bd);
+            border-radius:8px; padding:10px; margin-top:10px; }
+    .block { display:inline-flex; flex-direction:column; gap:.35rem; min-width:200px; }
+    .presets button { min-width:3rem; }
+  </style>
+</head>
+<body>
+  <h2>雙 RGB LED 控制（POST → /cgi-bin/led_toggle.py）</h2>
+
+  <fieldset>
+    <legend>共用設定</legend>
+    <div class="row">
+      <label>GPIO Chip：</label>
+      <input id="chip" class="chip" type="text" value="/dev/gpiochip2" />
+      <small>(你的 RGB 在 gpiochip2；LED0=線 0..2，LED1=線 3..5)</small>
+    </div>
+    <div class="row">
+      <button id="sendAll" class="btn">送出目前狀態</button>
+      <button id="allOff"  class="btn">兩顆全關</button>
+      <button id="allOn"   class="btn">兩顆全亮</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>LED0（線 0,1,2）</legend>
+    <div class="row">
+      <div class="block">
+        <label class="switch"><input id="r0" type="checkbox" />R0</label>
+        <label class="switch"><input id="g0" type="checkbox" />G0</label>
+        <label class="switch"><input id="b0" type="checkbox" />B0</label>
+      </div>
+      <div class="row presets">
+        <button class="btn" data-preset0="100">R</button>
+        <button class="btn" data-preset0="010">G</button>
+        <button class="btn" data-preset0="001">B</button>
+        <button class="btn" data-preset0="110">Y</button>
+        <button class="btn" data-preset0="101">M</button>
+        <button class="btn" data-preset0="011">C</button>
+        <button class="btn" data-preset0="000">OFF</button>
+        <button class="btn" data-preset0="111">ON</button>
+      </div>
+      <button id="send0" class="btn">只送 LED0</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>LED1（線 3,4,5）</legend>
+    <div class="row">
+      <div class="block">
+        <label class="switch"><input id="r1" type="checkbox" />R1</label>
+        <label class="switch"><input id="g1" type="checkbox" />G1</label>
+        <label class="switch"><input id="b1" type="checkbox" />B1</label>
+      </div>
+      <div class="row presets">
+        <button class="btn" data-preset1="100">R</button>
+        <button class="btn" data-preset1="010">G</button>
+        <button class="btn" data-preset1="001">B</button>
+        <button class="btn" data-preset1="110">Y</button>
+        <button class="btn" data-preset1="101">M</button>
+        <button class="btn" data-preset1="011">C</button>
+        <button class="btn" data-preset1="000">OFF</button>
+        <button class="btn" data-preset1="111">ON</button>
+      </div>
+      <button id="send1" class="btn">只送 LED1</button>
+    </div>
+  </fieldset>
+
+  <div id="resp" aria-live="polite">尚未送出</div>
+
+  <script>
+    const chipEl = document.querySelector('#chip');
+    const r0 = document.querySelector('#r0'), g0 = document.querySelector('#g0'), b0 = document.querySelector('#b0');
+    const r1 = document.querySelector('#r1'), g1 = document.querySelector('#g1'), b1 = document.querySelector('#b1');
+    const sendAllBtn = document.querySelector('#sendAll');
+    const send0Btn   = document.querySelector('#send0');
+    const send1Btn   = document.querySelector('#send1');
+    const allOffBtn  = document.querySelector('#allOff');
+    const allOnBtn   = document.querySelector('#allOn');
+    const respEl     = document.querySelector('#resp');
+
+    function uiBusy(b) {
+      [sendAllBtn, send0Btn, send1Btn, allOffBtn, allOnBtn, ...document.querySelectorAll('button[data-preset0],button[data-preset1]')]
+        .forEach(btn => btn.disabled = b);
+    }
+
+    function buildForm(part = 'both') {
+      // part: 'both' | 'led0' | 'led1'（後端可以選擇只處理帶到的欄位）
+      const form = {
+        chip: chipEl.value.trim() || '/dev/gpiochip2',
+      };
+      if (part === 'both' || part === 'led0') {
+        form.r0 = r0.checked ? '1' : '0';
+        form.g0 = g0.checked ? '1' : '0';
+        form.b0 = b0.checked ? '1' : '0';
+      }
+      if (part === 'both' || part === 'led1') {
+        form.r1 = r1.checked ? '1' : '0';
+        form.g1 = g1.checked ? '1' : '0';
+        form.b1 = b1.checked ? '1' : '0';
+      }
+      return form;
+    }
+
+    async function postForm(url, obj) {
+      const body = new URLSearchParams(obj);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body
+      });
+      const text = await res.text();
+      return { ok: res.ok, text };
+    }
+
+    async function send(part) {
+      uiBusy(true);
+      respEl.textContent = '送出中…';
+      try {
+        const { ok, text } = await postForm('/cgi-bin/led_toggle.py', buildForm(part));
+        respEl.textContent = text || (ok ? 'OK' : 'ERROR (no text)');
+      } catch (e) {
+        respEl.textContent = '發生錯誤：' + (e && e.message || e);
+      } finally {
+        uiBusy(false);
+      }
+    }
+
+    // 綁定事件
+    sendAllBtn.addEventListener('click', () => send('both'));
+    send0Btn  .addEventListener('click', () => send('led0'));
+    send1Btn  .addEventListener('click', () => send('led1'));
+
+    allOffBtn.addEventListener('click', () => { r0.checked=g0.checked=b0.checked=false; r1.checked=g1.checked=b1.checked=false; send('both'); });
+    allOnBtn .addEventListener('click', () => { r0.checked=g0.checked=b0.checked=true;  r1.checked=g1.checked=b1.checked=true;  send('both'); });
+
+    // LED0/LED1 預設色
+    document.querySelectorAll('button[data-preset0]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const s = btn.dataset.preset0; // "RGB"
+        r0.checked = s[0] === '1';
+        g0.checked = s[1] === '1';
+        b0.checked = s[2] === '1';
+        send('led0');
+      });
+    });
+    document.querySelectorAll('button[data-preset1]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const s = btn.dataset.preset1;
+        r1.checked = s[0] === '1';
+        g1.checked = s[1] === '1';
+        b1.checked = s[2] === '1';
+        send('led1');
+      });
+    });
+  </script>
+</body>
+</html>
+
