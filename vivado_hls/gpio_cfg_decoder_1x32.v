@@ -61,15 +61,12 @@ module gpio_cfg_decoder_axis32 #(
             commit_req      <= 1'b0;
             safe_we         <= 1'b0;
             safe_val        <= 1'b0;
-            stall_one       <= 1'b0;
         end else begin
             // default deassert pulses
             commit_req      <= 1'b0;
             safe_we         <= 1'b0;
             idx_we          <= 1'b0;
             gain_we         <= 1'b0;
-            // clear bubble by default; will set on COMMIT accept
-            stall_one  <= 1'b0;
             if (accept) begin
                 case (cmd)
                     CMD_IDX: begin
