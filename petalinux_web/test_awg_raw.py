@@ -18,7 +18,7 @@ IDX_1K   = 0x001      # your calibrated index for 1 kHz
 IDX_20K  = 0x020      # your calibrated index for 20 kHz
 GAIN_MAX = 0x1FFFF    # Q1.17 full-scale (low 20 bits)
 
-GAP_MS = 0.2          # pause between steps (ms). set 0 for fastest
+GAP_MS = 15.0          # pause between steps (ms). set 0 for fastest
 RECONNECT_DELAY_S = 0.2
 
 # =========================
