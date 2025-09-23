@@ -141,6 +141,17 @@ static void free_list(awg_list_t *L){
   L->ready=false;
 }
 
+static bool ensure_words_cap(awg_list_t *L, uint32_t need_more){
+  if (L->words_used + need_more <= L->words_cap) return true;
+  uint32_t want = L->words_used + need_more;
+  uint32_t cap  = L->words_cap ? L->words_cap : GROW_WORDS_STEP;
+  while (cap < want) cap += GROW_WORDS_STEP;
+  uint32_t *nw = (uint32_t*)realloc(L->words, cap*sizeof(uint32_t));
+  if (!nw) return false;
+  L->words = nw; L->words_cap = cap;
+  return true;
+}
+
 static bool push_frame(awg_list_t *L, const uint32_t *w, uint16_t count){
   if (L->loaded_frames >= L->total_frames) return false;
   if (count==0 || count>MAX_WORDS_PER_FRAME) return false;
@@ -274,17 +285,6 @@ static bool do_preload_push(int fd){
     }
     pthread_mutex_unlock(&G.mtx);
     return ok;
-}
-
-static bool ensure_words_cap(awg_list_t *L, uint32_t need_more){
-  if (L->words_used + need_more <= L->words_cap) return true;
-  uint32_t want = L->words_used + need_more;
-  uint32_t cap  = L->words_cap ? L->words_cap : GROW_WORDS_STEP;
-  while (cap < want) cap += GROW_WORDS_STEP;
-  uint32_t *nw = (uint32_t*)realloc(L->words, cap*sizeof(uint32_t));
-  if (!nw) return false;
-  L->words = nw; L->words_cap = cap;
-  return true;
 }
 
 // ... definitions for do_reset, do_abort, do_init_list, etc. ...
