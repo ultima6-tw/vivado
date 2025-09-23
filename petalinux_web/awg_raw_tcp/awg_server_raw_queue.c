@@ -111,6 +111,7 @@ static volatile int g_stop_queue = 0;
 static int g_listen_queue = -1;
 static pthread_t g_accept_thread_queue;
 static bool g_accept_thread_running = false; // [FIX#2] Boolean flag for safely joining the thread
+static volatile int g_active_client_fd = -1; 
 
 // --- Function implementations ---
 
@@ -453,7 +454,9 @@ static void* accept_loop_queue(void *arg) {
             continue;
         }
         // Queue mode is single-client, so we serve it directly in this thread
+        g_active_client_fd = fd;
         serve_client(fd);
+        g_active_client_fd = -1;
     }
     return NULL;
 }
@@ -495,6 +498,10 @@ int start_queue_server(unsigned short port){
 
 void stop_queue_server(void){
     g_stop_queue = 1;
+
+    if (g_active_client_fd >= 0) {
+        shutdown(g_active_client_fd, SHUT_RDWR);
+    }
 
     if (g_listen_queue >= 0){
         close(g_listen_queue);
