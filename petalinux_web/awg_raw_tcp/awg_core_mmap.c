@@ -58,34 +58,34 @@
 #include <sys/mman.h>
 
 // ------------------ AXI GPIO base addresses (EDIT THESE) ------------------
-// >>>>> 依你的設計修改下列兩個 BASE 實體位址（Vivado Address Editor）
+// >>>>> EDIT these two BASE physical addresses according to your design (Vivado Address Editor) <<<<<
 #define DATA_GPIO_BASE   0x41200000u   // gpiochip0: 32-bit DATA bus
 #define WEN_GPIO_BASE    0x41210000u   // gpiochip3: 1-bit  WEN
 // <<<<<
 
-// 寄存器 offset（AXI GPIO 單通道配置）
+// Register offsets (for single-channel AXI GPIO config)
 #define GPIO_DATA_OFFSET 0x00u
 #define GPIO_TRI_OFFSET  0x04u
 
-// WEN 所使用的 bit（通常用 bit0）
+// Bit used for WEN (typically bit 0)
 #define WEN_BIT          0
 
-// WEN 極性與脈寬（edge only）
+// WEN polarity and pulse width (edge only)
 #define DEF_WEN_ACTHI    1  // 1: active-high, 0: active-low
-#define DEF_WEN_US       0  // 0 = edge only（最快）
+#define DEF_WEN_US       0  // 0 = edge only (fastest)
 
-// Hex 長度（僅供註解參考；此版本不做 strlen 檢查以求極速）
+// Hex length (for reference only; this version skips strlen checks for max speed)
 enum { IDX_HEX_LEN = 24, GAIN_HEX_LEN = 144 };
 
 // ------------------ MMAP globals ------------------
 static int                g_fd_mem     = -1;
-static volatile uint32_t *g_data_regs  = NULL;  // 指向 DATA GPIO base
-static volatile uint32_t *g_wen_regs   = NULL;  // 指向 WEN  GPIO base
-static size_t             g_map_size   = 0x1000; // 4KB 足夠 AXI GPIO
+static volatile uint32_t *g_data_regs  = NULL;  // points to DATA GPIO base
+static volatile uint32_t *g_wen_regs   = NULL;  // points to WEN  GPIO base
+static size_t             g_map_size   = 0x1000; // 4KB is sufficient for AXI GPIO
 
 // ------------------ Barriers & tiny helpers ------------------
 static inline void cpu_mb(void) {
-    __sync_synchronize(); // 便宜的 full barrier
+    __sync_synchronize(); // a cheap full memory barrier
 }
 
 static inline void busy_wait_us(unsigned us) {
@@ -106,7 +106,7 @@ static inline uint32_t gpio_read(volatile uint32_t *base, uint32_t off) {
     return v;
 }
 
-// ------------------ Word packing（與你原版一致） ------------------
+// ------------------ Word packing (matches your original version) ------------------
 static inline uint32_t pack_sel(int ch, int tone) {
     return ((uint32_t)(ch & 1) << 27) | ((uint32_t)(tone & 7) << 24);
 }
@@ -121,7 +121,8 @@ static inline uint32_t make_commit_word(void) {
 }
 
 // ------------------ Ultra-fast hex helpers (NO validation) ------------------
-// 這些解析假設輸入一定是合法的 0-9 / a-f / A-F，為了極速不做檢查
+// These parsers assume the input is always valid hex (0-9, a-f, A-F).
+// No validation is performed for maximum speed.
 static inline uint32_t parse_hex_n(const char *p, int n) {
     uint32_t v = 0;
     for (int i = 0; i < n; i++) {
@@ -132,12 +133,12 @@ static inline uint32_t parse_hex_n(const char *p, int n) {
     return v;
 }
 
-// idx: 3-hex; gain: 18-hex（僅取最後 5 hex = 20 bits）
+// idx: 3-hex; gain: 18-hex (only the last 5 hex = 20 bits are used)
 static inline uint32_t parse_idx3_fast(const char *p3) {
-    return parse_hex_n(p3, 3);               // 0..0xFFF（後續再 & 0xFFFFF）
+    return parse_hex_n(p3, 3);               // 0..0xFFF (will be masked with 0xFFFFF later)
 }
 static inline uint32_t parse_gain18_low5_fast(const char *p18) {
-    return parse_hex_n(p18 + 13, 5);         // 僅取最低 20 bits
+    return parse_hex_n(p18 + 13, 5);         // only parse the lowest 20 bits
 }
 
 // ------------------ Low-level AWG strobes ------------------
@@ -152,14 +153,14 @@ static inline void wen_edge(int active_high, int pulse_us) {
     uint32_t off = active_high ? (val & ~(1u << WEN_BIT))
                                : (val |  (1u << WEN_BIT));
     gpio_write(g_wen_regs, GPIO_DATA_OFFSET, on);
-    busy_wait_us(pulse_us); // 0 表示純 edge
+    busy_wait_us(pulse_us); // 0 means edge-only (fastest)
     gpio_write(g_wen_regs, GPIO_DATA_OFFSET, off);
 }
 
 // ------------------ Public API ------------------
 int awg_init(void)
 {
-    // 開 /dev/mem 並映射兩個 AXI GPIO
+    // Open /dev/mem and map the two AXI GPIO regions
     g_fd_mem = open("/dev/mem", O_RDWR | O_SYNC);
     if (g_fd_mem < 0) { perror("open /dev/mem"); return -1; }
 
@@ -180,13 +181,13 @@ int awg_init(void)
         return -3;
     }
 
-    // 設成輸出：AXI GPIO TRI = 0 表輸出
-    //gpio_write(g_data_regs, GPIO_TRI_OFFSET, 0x00000000u);          // 32bit 全輸出
-    //gpio_write(g_wen_regs,  GPIO_TRI_OFFSET, ~(1u << WEN_BIT));     // 只保證 WEN_BIT 輸出；其餘隨意
+    // Set GPIO direction to output: AXI GPIO TRI=0 means output
+    //gpio_write(g_data_regs, GPIO_TRI_OFFSET, 0x00000000u);          // all 32 bits as output
+    //gpio_write(g_wen_regs,  GPIO_TRI_OFFSET, ~(1u << WEN_BIT));     // ensure WEN_BIT is output; others don't care
 
-    // 初始值
+    // Set initial values
     gpio_write(g_data_regs, GPIO_DATA_OFFSET, 0x00000000u);
-    // 依極性把 WEN 拉到「不觸發」的一側
+    // Pull WEN to the inactive state according to its polarity
     uint32_t w = gpio_read(g_wen_regs, GPIO_DATA_OFFSET);
     if (DEF_WEN_ACTHI) w &= ~(1u << WEN_BIT); else w |= (1u << WEN_BIT);
     gpio_write(g_wen_regs, GPIO_DATA_OFFSET, w);
@@ -208,7 +209,7 @@ int awg_send_hex4(const char *idxA_hex, const char *gainA_hex,
     if (!g_data_regs || !g_wen_regs) return -1;
     if (!idxA_hex || !gainA_hex || !idxB_hex || !gainB_hex) return -2;
 
-    // 直接解析 + 送出（不做長度/格式檢查以爭取極速）
+    // Directly parse and send (no length/format checks for max speed)
     // Channel A: 8*index, 8*gain
     for (int t = 0; t < 8; ++t) {
         uint32_t v20 = parse_idx3_fast(idxA_hex + 3 * t) & 0xFFFFFu;
