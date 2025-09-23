@@ -7,7 +7,7 @@
  *
  * Build:
  *   gcc -O2 -pthread -Wall -o awg_server \
- *       awg_server_main.c awg_server_direct.c awg_server_queue.c awg_core_mmap.c
+ *       awg_server_raw_top.c awg_server_raw_direct.c  awg_server_raw_queue.c awg_core_mmap.c
  *
  * Run (root for /dev/mem):
  *   sudo ./awg_server
