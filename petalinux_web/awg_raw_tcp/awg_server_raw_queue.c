@@ -556,7 +556,7 @@ drop:
   close(fd);
 }
 
-int main(int argc, char **argv){
+int start_queue_server(int argc, char **argv){
   int port = (argc>=2)? atoi(argv[1]) : DEFAULT_PORT;
 
   signal(SIGINT, on_sig);
