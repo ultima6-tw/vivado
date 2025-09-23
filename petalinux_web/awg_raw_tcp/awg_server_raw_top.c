@@ -44,7 +44,7 @@ int main(void) {
         fprintf(stderr, "failed to start direct server on 9000\n");
         return 2;
     }
-    if (start_queue_server(9001) != 0) {
+    if (start_queue_server(9100) != 0) {
         fprintf(stderr, "failed to start queue server on 9001\n");
         return 3;
     }
