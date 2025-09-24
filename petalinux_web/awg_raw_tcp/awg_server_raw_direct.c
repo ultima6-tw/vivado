@@ -1,5 +1,5 @@
 /*
- * awg_server_direct.c — Direct (no-queue) W-protocol server
+ * awg_server_raw_direct.c — Direct (no-queue) W-protocol server
  * Protocol:
  *   [2 bytes] COUNT (big-endian, number of 32-bit words; >0)
  *   [4*COUNT] WORDS (each 32-bit big-endian)

@@ -1,9 +1,10 @@
 /*
- * awg_server_main.c — Top-level launcher
+ * awg_server_raw_top.c — Top-level launcher
  * - Initializes AWG (/dev/mem mmap)
  * - Starts two listeners:
  *     port 9000 -> direct (no-queue) server
- *     port 9001 -> queued (single-writer) server
+ *     port 9100 -> queued (single-writer) server
+ *     port 9101 -> queued-notify server
  *
  * Build:
  *  gcc -O2 -pthread -Wall -DDEBUG -o awg_server \
@@ -84,6 +85,10 @@ int main(void) {
     DPRINT_MAIN("Stopping notify server...\n");
     stop_notify_server();
     DPRINT_MAIN("Notify server stopped.\n");
+
+    // [MODIFIED] Add the zero-out call before closing the core hardware interface.
+    DPRINT_MAIN("Setting hardware to a safe (zero) state...\n");
+    awg_zero_output();
 
     DPRINT_MAIN("Closing AWG core...\n");
     awg_close();

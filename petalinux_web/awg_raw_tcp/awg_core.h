@@ -4,10 +4,10 @@
 
 #include <stdint.h>
 
-// 初始化 GPIO (只要呼叫一次)
+// Initialize GPIO (call only once at startup)
 int awg_init(void);
 
-// 傳送一組 hex string (4 條字串：24, 144, 24, 144)
+// Send a set of hex strings (4 strings: 24, 144, 24, 144 chars)
 int awg_send_hex4(
     const char *idxA_hex,   // 24 hex chars
     const char *gainA_hex,  // 144 hex chars
@@ -15,9 +15,13 @@ int awg_send_hex4(
     const char *gainB_hex   // 144 hex chars
 );
 
+// Send an array of pre-packed 32-bit words to the hardware
 int awg_send_words32(const uint32_t *words32, int count);
 
-// 結束 (釋放資源)
+// Zeros all output gains for safety
+int awg_zero_output(void);
+
+// Deinitialize and release resources
 void awg_close(void);
 
-#endif
+#endif // AWG_CORE_H

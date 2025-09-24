@@ -1,5 +1,5 @@
 // =============================================================
-// awg_core.c  —  High-speed AWG GPIO core (C, mmap /dev/mem)
+// awg_core_mmap.c  —  High-speed AWG GPIO core (C, mmap /dev/mem)
 // -------------------------------------------------------------
 // Build (shared lib):
 //   gcc -O3 -fPIC -shared -o libawg_core.so awg_core.c
@@ -252,4 +252,29 @@ int awg_send_words32(const uint32_t *words32, int count)
         wen_edge(DEF_WEN_ACTHI, DEF_WEN_US);
     }
     return 0;
+}
+
+// [NEW] Sets all tone gains to zero and issues a commit command.
+// This is a safety function to ensure the hardware is in a known safe state.
+int awg_zero_output(void)
+{
+    if (!g_data_regs || !g_wen_regs) return -1;
+
+    // Build: write GAIN=0 for A.tone0..7 and B.tone0..7, then COMMIT
+    uint32_t words[16 + 1];
+    int idx = 0;
+
+    for (int ch = 0; ch < 2; ++ch) {
+        for (int tone = 0; tone < 8; ++tone) {
+            uint32_t w = (0x2u << 28)
+                       | ((uint32_t)(ch & 1) << 27)
+                       | ((uint32_t)(tone & 7) << 24)
+                       | 0u; // gain20 = 0
+            words[idx++] = w;
+        }
+    }
+    words[idx++] = (0xFu << 28); // COMMIT
+    
+    // Use the existing awg_send_words32 to send the sequence
+    return awg_send_words32(words, idx);
 }
