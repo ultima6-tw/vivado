@@ -126,7 +126,7 @@ def main():
     op_T_period(s, 1000)
 
     # 預載 list0: 1000 frames（1k/20k 交替）
-    nframes = 1000
+    nframes = 10
     print(f"[CLIENT] preload list0 ({nframes} frames)")
     op_I_init(s, 0, nframes)
     op_B_begin(s, 0, nframes)
@@ -147,7 +147,7 @@ def main():
     while time.time() - t0 < 5.0:
         st = op_Q_query(s)
         print(f"[Q] playing={st['playing']} list={st['cur_list']} frame={st['cur_frame']} free0={st['free0']} free1={st['free1']}")
-        time.sleep(0.25)
+        time.sleep(0.01)
 
     stats = op_S_stats(s)
     print(f"[S] {stats}")

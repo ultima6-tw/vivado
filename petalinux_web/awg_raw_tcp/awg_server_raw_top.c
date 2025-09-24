@@ -45,11 +45,11 @@ int main(void) {
         return 2;
     }
     if (start_queue_server(9100) != 0) {
-        fprintf(stderr, "failed to start queue server on 9001\n");
+        fprintf(stderr, "failed to start queue server on 9100\n");
         return 3;
     }
 
-    printf("[MAIN] servers up. Ports: 9000=direct, 9001=queued\n");
+    printf("[MAIN] servers up. Ports: 9000=direct, 9100=queued\n");
     while (!g_stop) usleep(100000); // 100 ms tick
 
     // best-effort stop
