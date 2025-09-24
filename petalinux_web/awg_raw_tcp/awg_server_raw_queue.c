@@ -57,6 +57,7 @@
 #include <unistd.h>
 
 #include "awg_core.h"
+#include "awg_server_shared.h" 
 
 #ifdef DEBUG
   #define DPRINT(fmt, ...) printf("[QSRV] " fmt, ##__VA_ARGS__)
@@ -184,59 +185,88 @@ static void send_zero_output(void){
   awg_send_words32(words, idx);
 }
 
-static void *player_thread(void *arg){
-  (void)arg;
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  while (!g_stop_queue){
-    uint32_t us;
-    pthread_mutex_lock(&G.mtx);
-    us = G.period_us;
-    pthread_mutex_unlock(&G.mtx);
-    ts.tv_nsec += (long)us * 1000L;
-    while (ts.tv_nsec >= 1000000000L){ ts.tv_nsec -= 1000000000L; ts.tv_sec++; }
-    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
-    pthread_mutex_lock(&G.mtx);
-    if (!G.playing){
-      pthread_mutex_unlock(&G.mtx);
-      continue;
-    }
-    awg_list_t *CL = &G.list[G.cur_list];
-    awg_list_t *NL = &G.list[G.next_list];
-    if (G.cur_frame < CL->loaded_frames){
-      uint32_t off = CL->offsets[G.cur_frame];
-      uint16_t cnt = CL->counts [G.cur_frame];
-      uint32_t *w  = &CL->words[off];
-      pthread_mutex_unlock(&G.mtx);
-      awg_send_words32(w, cnt);
-      pthread_mutex_lock(&G.mtx);
-      G.cur_frame++;
-      if (G.cur_frame >= CL->loaded_frames){
-        if (NL->ready && NL->loaded_frames > 0){
-          int tmp  = G.cur_list; G.cur_list = G.next_list; G.next_list = tmp;
-          G.cur_frame = 0;
-          G.switches++;
-          free_list(CL);
-        }else{
-          G.playing   = false;
-          G.cur_frame = 0;
-          free_list(CL);
-          G.holds++;
+static void *player_thread(void *arg) {
+    (void)arg;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    while (!g_stop_queue) {
+        // Determine sleep time
+        uint32_t us;
+        pthread_mutex_lock(&G.mtx);
+        us = G.period_us;
+        pthread_mutex_unlock(&G.mtx);
+
+        // Sleep until next tick
+        ts.tv_nsec += (long)us * 1000L;
+        while (ts.tv_nsec >= 1000000000L) {
+            ts.tv_nsec -= 1000000000L;
+            ts.tv_sec++;
         }
-      }
-    }else{
-      if (NL->ready && NL->loaded_frames > 0){
-        int tmp  = G.cur_list; G.cur_list = G.next_list; G.next_list = tmp;
-        G.cur_frame = 0;
-        G.switches++;
-        free_list(CL);
-      } else {
-        G.holds++;
-      }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+
+        pthread_mutex_lock(&G.mtx);
+
+        if (!G.playing) {
+            pthread_mutex_unlock(&G.mtx);
+            continue;
+        }
+
+        awg_list_t *CL = &G.list[G.cur_list];
+        awg_list_t *NL = &G.list[G.next_list];
+
+        // Check if current list is finished
+        if (G.cur_frame >= CL->loaded_frames) {
+            int old_list_idx = G.cur_list; // The list that just finished playing
+
+            // If next list is ready, switch to it
+            if (NL->ready && NL->loaded_frames > 0) {
+                DPRINT("Switching from list %d to %d\n", G.cur_list, G.next_list);
+                int tmp = G.cur_list;
+                G.cur_list = G.next_list;
+                G.next_list = tmp;
+                G.cur_frame = 0;
+                G.switches++;
+                free_list(CL);
+
+                // [MODIFIED] The old list is now IDLE. Notify the system.
+                pthread_mutex_lock(&g_notify_mutex);
+                g_list_status[old_list_idx] = LIST_IDLE;
+                pthread_mutex_unlock(&g_notify_mutex);
+                send_system_status();
+            } else {
+                // Otherwise, stop playback and go idle
+                DPRINT("End of list %d, no next ready -> stopping.\n", old_list_idx);
+                G.playing = false;
+                G.cur_frame = 0;
+                free_list(CL);
+                G.holds++;
+
+                // [MODIFIED] The old list is now IDLE. Notify the system.
+                pthread_mutex_lock(&g_notify_mutex);
+                g_list_status[old_list_idx] = LIST_IDLE;
+                pthread_mutex_unlock(&g_notify_mutex);
+                send_system_status();
+            }
+        }
+
+        // If still playing, send the current frame
+        if (G.playing) {
+            uint32_t off = CL->offsets[G.cur_frame];
+            uint16_t cnt = CL->counts[G.cur_frame];
+            uint32_t *w = &CL->words[off];
+            
+            // Send data outside of the main lock to avoid long critical sections
+            pthread_mutex_unlock(&G.mtx);
+            awg_send_words32(w, cnt);
+            pthread_mutex_lock(&G.mtx);
+
+            G.cur_frame++;
+        }
+        
+        pthread_mutex_unlock(&G.mtx);
     }
-    pthread_mutex_unlock(&G.mtx);
-  }
-  return NULL;
+    return NULL;
 }
 
 static void start_player_if_needed(){
@@ -321,22 +351,45 @@ static bool do_init_list(uint8_t list_id, uint32_t max_frames){
   return true;
 }
 
-static bool do_preload_begin(uint8_t list_id, uint32_t total_frames){
-  if (list_id>1 || total_frames==0) return false;
-  pthread_mutex_lock(&G.mtx);
-  awg_list_t *L=&G.list[list_id];
-  free(L->offsets); free(L->counts); L->offsets=NULL; L->counts=NULL;
-  L->words_used=0;           // 保留 words buffer 容量以重用
-  L->ready=false;
-  bool ok = true;
-  L->offsets = (uint32_t*)realloc(L->offsets, total_frames*sizeof(uint32_t));
-  L->counts  = (uint16_t*)realloc(L->counts,  total_frames*sizeof(uint16_t));
-  if (!L->offsets || !L->counts) ok=false;
-  L->total_frames  = ok ? total_frames : 0;
-  L->loaded_frames = 0;
-  pthread_mutex_unlock(&G.mtx);
-  DPRINT("BEGIN list=%u total_frames=%u (%s)\n", list_id, total_frames, ok?"ok":"OOM");
-  return ok;
+static bool do_preload_begin(uint8_t list_id, uint32_t total_frames) {
+    if (list_id > 1 || total_frames == 0) return false;
+
+    // This helper function was in the original code and is a bit cleaner.
+    // It handles the reallocs and resets the list's metadata.
+    bool ensure_frame_meta(awg_list_t *L, uint32_t total_frames);
+
+    pthread_mutex_lock(&G.mtx);
+    awg_list_t *L = &G.list[list_id];
+    
+    // Clear list metadata and prepare for new frames
+    free(L->offsets); L->offsets = NULL;
+    free(L->counts); L->counts = NULL;
+    L->words_used = 0; // Keep words buffer capacity for reuse
+    L->ready = false;
+
+    bool ok = true;
+    L->offsets = (uint32_t*)realloc(L->offsets, total_frames * sizeof(uint32_t));
+    L->counts  = (uint16_t*)realloc(L->counts,  total_frames * sizeof(uint16_t));
+    if (!L->offsets || !L->counts) {
+        ok = false;
+    }
+    L->total_frames  = ok ? total_frames : 0;
+    L->loaded_frames = 0;
+    pthread_mutex_unlock(&G.mtx);
+
+    if (ok) {
+        // [MODIFIED] Set this list's status to FULL because it's now being preloaded.
+        pthread_mutex_lock(&g_notify_mutex);
+        g_list_status[list_id] = LIST_FULL;
+        pthread_mutex_unlock(&g_notify_mutex);
+        
+        // [MODIFIED] Trigger a system status update. This will send a "FULL"
+        // notification if the other list is also busy.
+        send_system_status();
+    }
+
+    DPRINT("BEGIN list=%u total_frames=%u (%s)\n", list_id, total_frames, ok ? "ok" : "OOM");
+    return ok;
 }
 
 static bool do_preload_end(uint8_t list_id){

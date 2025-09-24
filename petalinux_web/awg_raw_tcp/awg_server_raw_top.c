@@ -21,11 +21,20 @@
 #include <unistd.h>
 #include "awg_core.h"
 
+// [ADD] Define a debug print macro specific to this file
+#ifdef DEBUG
+  #define DPRINT_MAIN(fmt, ...) printf("[MAIN] " fmt, ##__VA_ARGS__)
+#else
+  #define DPRINT_MAIN(fmt, ...) do{}while(0)
+#endif
+
 // exported by the two backends
 int start_direct_server(unsigned short port);
 int start_queue_server (unsigned short port);
+int start_notify_server(unsigned short port);
 void stop_direct_server(void);
 void stop_queue_server (void);
+void stop_notify_server(void);
 
 static volatile int g_stop = 0;
 static void on_signal(int sig){ (void)sig; g_stop = 1; }
@@ -49,13 +58,33 @@ int main(void) {
         return 3;
     }
 
+    if (start_notify_server(9101) != 0) {
+        fprintf(stderr, "failed to start notify server on 9101\n");
+        return 4;
+    }
+    
+
     printf("[MAIN] servers up. Ports: 9000=direct, 9100=queued\n");
     while (!g_stop) usleep(100000); // 100 ms tick
 
-    // best-effort stop
+    DPRINT_MAIN("\nStop signal received. Shutting down...\n");
+
+    DPRINT_MAIN("Stopping direct server...\n");
     stop_direct_server();
+    DPRINT_MAIN("Direct server stopped.\n");
+
+    DPRINT_MAIN("Stopping queue server...\n");
     stop_queue_server();
+    DPRINT_MAIN("Queue server stopped.\n");
+
+    DPRINT_MAIN("Stopping notify server...\n");
+    stop_notify_server();
+    DPRINT_MAIN("Notify server stopped.\n");
+
+    DPRINT_MAIN("Closing AWG core...\n");
     awg_close();
+    DPRINT_MAIN("AWG core closed.\n");
+    
     printf("[MAIN] stopped\n");
     return 0;
 }
