@@ -6,8 +6,12 @@
  *     port 9001 -> queued (single-writer) server
  *
  * Build:
- *   gcc -O2 -pthread -Wall -o awg_server \
- *       awg_server_raw_top.c awg_server_raw_direct.c  awg_server_raw_queue.c awg_core_mmap.c
+ *  gcc -O2 -pthread -Wall -DDEBUG -o awg_server \
+ *       awg_server_raw_top.c \
+ *       awg_server_raw_direct.c \
+ *       awg_server_raw_queue.c \
+ *       awg_server_raw_notify.c \
+ *       awg_core_mmap.c
  *
  * Run (root for /dev/mem):
  *   sudo ./awg_server
@@ -64,7 +68,7 @@ int main(void) {
     }
     
 
-    printf("[MAIN] servers up. Ports: 9000=direct, 9100=queued\n");
+    printf("[MAIN] servers up. Ports: 9000=direct, 9100=queued, 9101=notify\n");
     while (!g_stop) usleep(100000); // 100 ms tick
 
     DPRINT_MAIN("\nStop signal received. Shutting down...\n");
@@ -84,7 +88,7 @@ int main(void) {
     DPRINT_MAIN("Closing AWG core...\n");
     awg_close();
     DPRINT_MAIN("AWG core closed.\n");
-    
+
     printf("[MAIN] stopped\n");
     return 0;
 }

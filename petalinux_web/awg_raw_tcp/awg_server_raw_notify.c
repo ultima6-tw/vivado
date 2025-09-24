@@ -10,8 +10,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <errno.h>   // [FIX] Added for errno and EINTR
+#include <signal.h>  // [FIX] Added for SIGUSR1 and pthread_kill
 
-#include "awg_server_shared.h" // Include our shared declarations
+#include "awg_server_raw_shared.h" // Include our shared declarations
 
 #ifdef DEBUG
   #define DPRINT(fmt, ...) printf("[NOTIFY] " fmt, ##__VA_ARGS__)
@@ -67,7 +69,9 @@ static void* accept_loop_notify(void* arg) {
     while (!g_stop_notify) {
         int fd = accept(g_listen_notify, NULL, NULL);
         if (fd < 0) {
-            if (g_stop_notify) break; // Normal shutdown
+            if (g_stop_notify) break;
+            // [ADD] Add EINTR check, same as in the queue server
+            if (errno == EINTR) continue;
             perror("[NOTIFY] accept");
             continue;
         }
@@ -122,7 +126,14 @@ int start_notify_server(unsigned short port) {
 }
 
 void stop_notify_server(void) {
+    DPRINT("stop_notify_server() entered.\n");
     g_stop_notify = 1;
+
+    // [ADD] Actively interrupt the accept thread with a signal
+    if (g_accept_thread_running) {
+        DPRINT("Sending SIGUSR1 to notify accept thread to unblock it...\n");
+        pthread_kill(g_accept_thread_notify, SIGUSR1);
+    }
 
     if (g_listen_notify >= 0) {
         close(g_listen_notify);
@@ -138,10 +149,12 @@ void stop_notify_server(void) {
     pthread_mutex_unlock(&g_notify_mutex);
 
     if (g_accept_thread_running) {
+        DPRINT("Waiting for notify accept thread to join...\n");
         pthread_join(g_accept_thread_notify, NULL);
+        DPRINT("Notify accept thread has joined.\n");
         g_accept_thread_running = false;
     }
 
-    pthread_mutex_destroy(&g_notify_mutex);
-    DPRINT("Server stopped\n");
+    // [FIX] Removed pthread_mutex_destroy(&g_notify_mutex);
+    DPRINT("stop_notify_server() finished.\n");
 }

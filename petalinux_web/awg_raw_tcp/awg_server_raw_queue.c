@@ -1,42 +1,50 @@
-// awg_server_queue.c — Queue-mode AWG server (2 lists ping-pong, hold-last-frame)
-//
-// This file implements the queue-mode server as a module. It is started and
-// managed by awg_server_main.c. This version includes fixes for graceful
-// shutdown, statistics counters, and portability (unaligned memory access).
-//
-// Exported API:
-//   int  start_queue_server(unsigned short port);
-//   void stop_queue_server(void);
-//
-// Build (as part of the main server):
-//   gcc -O2 -pthread -Wall -o awg_server  awg_server_raw_top.c awg_server_raw_direct.c  awg_server_raw_queue.c awg_core_mmap.c
-//
-// Run (via the main launcher):
-//   sudo ./awg_server
-//
-// Depends on awg_core.h:
-//   int  awg_send_words32(const uint32_t *words32, int count);
-//
-// Protocol (binary, big-endian; single-client at a time):
-//   'Z' RESET           : clear both lists and stop playback. Leaves last HW output as-is.
-//   'X' ABORT           : stop, clear both lists AND actively zero output (send gains=0 + COMMIT).
-//   'I' INIT_LIST       : [u8 list_id(0/1)] [u32 max_frames_hint]
-//   'B' PRELOAD_BEGIN   : [u8 list_id] [u32 total_frames]   (clears list and sets capacity)
-//   'P' PRELOAD_PUSH    : [u8 list_id] [u16 count] [count * u32 word_be]   (append ONE frame)
-//   'E' PRELOAD_END     : [u8 list_id]                     (mark READY; if id==0 and idle -> auto-start)
-//   'T' SET_PERIOD_US   : [u32 period_us]                  (default 1000 us)
-//   'Q' QUERY_STATUS    : server replies 16 bytes.
-//   'S' STATS           : server replies 32 bytes.
-// All multi-byte fields are big-endian.
-//
-// Playback semantics:
-// - Two lists (0/1). PRELOAD_* fills one list with a sequence of frames.
-// - Player wakes every period_us; each frame is sent via awg_send_words32().
-// - When a list finishes:
-//     * If the other list is READY: switch to it AND auto-clear the finished list.
-//     * If not READY: stop (go idle) AND auto-clear the finished list.
-// - While idle, no words are sent (HW holds its last value); when the other list becomes
-//   READY, the player picks it up automatically.
+/*
+ * awg_server_queue.c — Queue-mode AWG server (2 lists ping-pong, hold-last-frame)
+ *
+ * This file implements the queue-mode server as a module. It is started and
+ * managed by awg_server_main.c. This version includes fixes for graceful
+ * shutdown, statistics counters, and portability (unaligned memory access).
+ *
+ * Exported API:
+ * int  start_queue_server(unsigned short port);
+ * void stop_queue_server(void);
+ *
+ * Build (as part of the main server):
+ * gcc -O2 -pthread -Wall -DDEBUG -o awg_server \
+ * awg_server_raw_top.c \
+ * awg_server_raw_direct.c \
+ * awg_server_raw_queue.c \
+ * awg_server_raw_notify.c \
+ * awg_core_mmap.c
+ *
+ * Run (via the main launcher):
+ * sudo ./awg_server
+ *
+ * Depends on awg_core.h:
+ * int  awg_send_words32(const uint32_t *words32, int count);
+ *
+ * Protocol (binary, big-endian; single-client at a time):
+ * 'Z' RESET           : clear both lists and stop playback. Leaves last HW output as-is.
+ * 'X' ABORT           : stop, clear both lists AND actively zero output (send gains=0 + COMMIT).
+ * 'I' INIT_LIST       : [u8 list_id(0/1)] [u32 max_frames_hint]
+ * 'B' PRELOAD_BEGIN   : [u8 list_id] [u32 total_frames]   (clears list and sets capacity)
+ * 'P' PRELOAD_PUSH    : [u8 list_id] [u16 count] [count * u32 word_be]   (append ONE frame)
+ * 'E' PRELOAD_END     : [u8 list_id]                     (mark READY; if id==0 and idle -> auto-start)
+ * 'T' SET_PERIOD_US   : [u32 period_us]                  (default 1000 us)
+ * 'Q' QUERY_STATUS    : server replies 16 bytes.
+ * 'S' STATS           : server replies 32 bytes.
+ * All multi-byte fields are big-endian.
+ *
+ * Playback semantics:
+ * - Two lists (0/1). PRELOAD_* fills one list with a sequence of frames.
+ * - Player wakes every period_us; each frame is sent via awg_send_words32().
+ * - When a list finishes:
+ * * If the other list is READY: switch to it AND auto-clear the finished list.
+ * * If not READY: stop (go idle) AND auto-clear the finished list.
+ * - While idle, no words are sent (HW holds its last value); when the other list becomes
+ * READY, the player picks it up automatically.
+ */
+
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -57,7 +65,7 @@
 #include <unistd.h>
 
 #include "awg_core.h"
-#include "awg_server_shared.h" 
+#include "awg_server_raw_shared.h" 
 
 #ifdef DEBUG
   #define DPRINT(fmt, ...) printf("[QSRV] " fmt, ##__VA_ARGS__)
@@ -115,6 +123,12 @@ static bool g_accept_thread_running = false; // [FIX#2] Boolean flag for safely 
 static volatile int g_active_client_fd = -1; 
 
 // --- Function implementations ---
+// An empty signal handler used just to interrupt blocking syscalls.
+static void dummy_signal_handler(int sig) {
+    (void)sig;
+    // Do nothing.
+}
+
 
 static int read_n_timeout(int fd, void *buf, size_t n, int timeout_ms){
   uint8_t *p = (uint8_t*)buf;
@@ -518,6 +532,16 @@ static void* accept_loop_queue(void *arg) {
 
 int start_queue_server(unsigned short port){
   g_stop_queue = 0;
+
+  // [NEW] Register a dummy signal handler for SIGUSR1
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = dummy_signal_handler;
+  if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+      perror("[QSRV] sigaction");
+      return -1; // Or handle error appropriately
+  }
+
   init_lists();
   start_player_if_needed();
 
@@ -550,25 +574,38 @@ int start_queue_server(unsigned short port){
 }
 
 void stop_queue_server(void){
+    DPRINT("stop_queue_server() entered.\n");
     g_stop_queue = 1;
 
+    // [MODIFIED] Actively interrupt the accept thread with a signal
+    if (g_accept_thread_running) {
+        DPRINT("Sending SIGUSR1 to accept thread to unblock it...\n");
+        pthread_kill(g_accept_thread_queue, SIGUSR1);
+    }
+    
     if (g_active_client_fd >= 0) {
+        DPRINT("Shutting down active client socket (fd=%d).\n", g_active_client_fd);
         shutdown(g_active_client_fd, SHUT_RDWR);
     }
 
     if (g_listen_queue >= 0){
+        DPRINT("Closing listening socket.\n");
         close(g_listen_queue);
         g_listen_queue = -1;
     }
     
-    // [FIX#2] Use the boolean flag for a reliable check before joining.
     if (g_accept_thread_running) {
+        DPRINT("Waiting for accept thread to join...\n");
         pthread_join(g_accept_thread_queue, NULL);
+        DPRINT("Accept thread has joined.\n");
         g_accept_thread_running = false;
     }
 
     if (G.player_thread_running) {
+        DPRINT("Waiting for player thread to join...\n");
         pthread_join(G.player_thread_h, NULL);
+        DPRINT("Player thread has joined.\n");
         G.player_thread_running = false;
     }
+    DPRINT("stop_queue_server() finished.\n");
 }

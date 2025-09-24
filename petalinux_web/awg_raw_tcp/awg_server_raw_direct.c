@@ -4,7 +4,14 @@
  *   [2 bytes] COUNT (big-endian, number of 32-bit words; >0)
  *   [4*COUNT] WORDS (each 32-bit big-endian)
  * Each frame is applied immediately: awg_send_words32(words, COUNT).
- *
+ * Build:
+ *  gcc -O2 -pthread -Wall -DDEBUG -o awg_server \
+ *       awg_server_raw_top.c \
+ *       awg_server_raw_direct.c \
+ *       awg_server_raw_queue.c \
+ *       awg_server_raw_notify.c \
+ *       awg_core_mmap.c
+ * 
  * Exported API:
  *   int  start_direct_server(unsigned short port);
  *   void stop_direct_server(void);
