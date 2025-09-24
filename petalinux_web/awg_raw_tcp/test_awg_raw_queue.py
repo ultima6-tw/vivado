@@ -117,8 +117,8 @@ def frame_20k():
 # ---------- Main (Looping Version) ----------
 def main():
     print(f"[CLIENT] connect {HOST}:{PORT} ...")
-    # 根據您的設定，伺服器是在 9001 埠號
-    s = connect_with_mdns(port=9001) 
+    # 根據您的設定，伺服器是在 9100 埠號
+    s = connect_with_mdns(port=9100) 
     print("[CLIENT] connected")
 
     try:
@@ -128,7 +128,7 @@ def main():
         print("[CLIENT] set period = 1000 us")
         op_T_period(s, 1000)
 
-        nframes = 1000  # 每個列表要裝載的幀數
+        nframes = 10000  # 每個列表要裝載的幀數
 
         # 2. 初始填裝 (Initial Priming)
         #    - 先填裝好 list0，伺服器會自動開始播放它
@@ -153,27 +153,27 @@ def main():
             # --- 觀察階段：等待伺服器切換到我們期望的列表 ---
             # 如果我們下一次要填裝 list0，代表我們在等伺服器開始播放 list1
             wait_for_list = 1 - next_list_to_load
-            print(f"[*] Waiting for server to start playing list {wait_for_list}...")
+            #print(f"[*] Waiting for server to start playing list {wait_for_list}...")
             
             while True:
                 st = op_Q_query(s)
-                print(f"\r[Q] playing={st['playing']} list={st['cur_list']} frame={st['cur_frame']:<5d}", end="")
+                #print(f"\r[Q] playing={st['playing']} list={st['cur_list']} frame={st['cur_frame']:<5d}", end="")
                 
                 # 如果伺服器已經切換到我們等待的列表，代表另一個列表已經空了
                 if st['cur_list'] == wait_for_list:
-                    print(f"\n[*] Server switched to list {wait_for_list}. List {next_list_to_load} is now free for preloading.")
+                    #print(f"\n[*] Server switched to list {wait_for_list}. List {next_list_to_load} is now free for preloading.")
                     break # 跳出觀察迴圈，進入填裝階段
                 
-                time.sleep(0.2) # 每 0.2 秒查詢一次
+                time.sleep(0.01) # 每 5ms 查詢一次
 
             # --- 裝填階段：為剛被清空的 list 重新填裝新的內容 ---
-            print(f"    -> Preloading list {next_list_to_load} with new data...")
+            #print(f"    -> Preloading list {next_list_to_load} with new data...")
             op_B_begin(s, next_list_to_load, nframes)
             for i in range(nframes):
                 # 這裡您可以放入新的波形資料產生邏輯
                 op_P_push(s, next_list_to_load, frame_1k() if (i % 2 == 0) else frame_20k())
             op_E_end(s, next_list_to_load)
-            print(f"    -> Preloading list {next_list_to_load} complete.")
+            #print(f"    -> Preloading list {next_list_to_load} complete.")
 
             # 更新下一次要填裝的目標
             next_list_to_load = 1 - next_list_to_load
