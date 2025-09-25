@@ -103,6 +103,7 @@ static int g_listen_queue = -1;
 static pthread_t g_accept_thread_queue;
 static bool g_accept_thread_running = false;
 static volatile int g_active_client_fd = -1;
+static volatile bool g_loading_in_progress[2] = { false, false };
 
 // --- [FIX #1] Add forward declarations for static functions ---
 static bool prepare_list_for_preload(awg_list_t *L, uint32_t total_frames);
@@ -264,6 +265,23 @@ static void start_player_if_needed(){
   }
 }
 
+static void cancel_preload_and_mark_idle(int list_id) {
+    if (list_id < 0 || list_id > 1) return;
+
+    pthread_mutex_lock(&G.mtx);
+    clear_list_fully(&G.list[list_id]);          // clear no load complate data
+    pthread_mutex_unlock(&G.mtx);
+
+    g_loading_in_progress[list_id] = false;
+
+    pthread_mutex_lock(&g_notify_mutex);
+    g_list_status[list_id] = LIST_IDLE;          // change g_list_status
+    pthread_mutex_unlock(&g_notify_mutex);
+
+    send_status_update(list_id);
+    DPRINT("CANCEL preload on list %d -> IDLE (timeout/error)\n", list_id);
+}
+
 static void do_reset(){
     pthread_mutex_lock(&G.mtx);
     G.playing=false; G.cur_list=0; G.next_list=1; G.cur_frame=0;
@@ -275,6 +293,8 @@ static void do_reset(){
     pthread_mutex_unlock(&g_notify_mutex);
     send_status_update(0);
     send_status_update(1);
+    g_loading_in_progress[0] = false;
+    g_loading_in_progress[1] = false;
     DPRINT("RESET\n");
 }
 
@@ -288,6 +308,8 @@ static bool do_preload_begin(uint8_t list_id, uint32_t total_frames){
         g_list_status[list_id] = LIST_LOADING;
         pthread_mutex_unlock(&g_notify_mutex);
         send_status_update(list_id);
+
+        g_loading_in_progress[list_id] = true;
     }
     DPRINT("BEGIN for list %u. OK=%d\n", (unsigned)list_id, ok);
     return ok;
@@ -326,11 +348,12 @@ static bool do_preload_end(uint8_t list_id) {
     pthread_mutex_lock(&G.mtx);
     awg_list_t *L = &G.list[list_id];
     if (L->loaded_frames == 0){ pthread_mutex_unlock(&G.mtx); return false; }
-    L->ready = true;
+    if (!L->ready){ L->ready = true; }
     pthread_mutex_lock(&g_notify_mutex);
     g_list_status[list_id] = LIST_READY;
     pthread_mutex_unlock(&g_notify_mutex);
     send_status_update(list_id);
+    g_loading_in_progress[list_id] = false;
     if (!G.playing && list_id == 0) {
         G.playing = true; G.cur_list = 0; G.next_list = 1; G.cur_frame = 0;
         start_player_if_needed();
@@ -361,6 +384,9 @@ static void serve_client(int fd){
         }
     }
 drop:
+    if (g_loading_in_progress[0]) cancel_preload_and_mark_idle(0);
+    if (g_loading_in_progress[1]) cancel_preload_and_mark_idle(1);
+
     DPRINT("client disconnected (fd=%d)\n", fd);
     close(fd);
 }

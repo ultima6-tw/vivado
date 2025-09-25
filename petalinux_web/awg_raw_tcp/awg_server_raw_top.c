@@ -58,15 +58,18 @@ int main(void) {
         fprintf(stderr, "failed to start direct server on 9000\n");
         return 2;
     }
+    
+    if (start_notify_server(9101) != 0) {
+        fprintf(stderr, "failed to start notify server on 9101\n");
+        return 4;
+    }
+
     if (start_queue_server(9100) != 0) {
         fprintf(stderr, "failed to start queue server on 9100\n");
         return 3;
     }
 
-    if (start_notify_server(9101) != 0) {
-        fprintf(stderr, "failed to start notify server on 9101\n");
-        return 4;
-    }
+
     
 
     printf("[MAIN] servers up. Ports: 9000=direct, 9100=queued, 9101=notify\n");
