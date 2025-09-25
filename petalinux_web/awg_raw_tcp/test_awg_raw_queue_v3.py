@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3A
 # -*- coding: utf-8 -*-
 """
 Final, event-driven, dual-channel AWG client.
