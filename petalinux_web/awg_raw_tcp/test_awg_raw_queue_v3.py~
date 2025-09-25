@@ -46,6 +46,29 @@ def op_P_push(s, list_id: int, words):
     s.sendall(b'P' + struct.pack(">BH", list_id, len(words)) + payload)
 def op_E_end(s, list_id: int): s.sendall(b'E' + struct.pack(">B", list_id))
 
+# --- [NEW] Helper function to build a large batch of 'P' commands in memory ---
+def build_p_command_batch(list_id: int, nframes: int) -> bytes:
+    """
+    Builds a single, large bytes object containing a sequence of 'P' commands
+    for all frames in a list. The content alternates between frame_A and frame_B.
+    """
+    all_packets = []
+    for i in range(nframes):
+        # Determine which frame to use for this iteration
+        words = frame_A() if i % 2 == 0 else frame_B()
+        
+        # Pack the word payload (e.g., [idx, gain, commit])
+        payload = b''.join(struct.pack(">I", w) for w in words)
+        
+        # Construct the complete 'P' command packet (P + header + payload)
+        packet = b'P' + struct.pack(">BH", list_id, len(words)) + payload
+        
+        # Add the packet to our list
+        all_packets.append(packet)
+        
+    # Join all the small packets into one giant bytes object and return it
+    return b''.join(all_packets)
+
 # --- [MODIFIED] Notification Listener Thread ---
 def notification_listener(host_ip: str, port: int):
     s_notify = None
@@ -86,10 +109,10 @@ def notification_listener(host_ip: str, port: int):
         print("[NOTIFY] Listener thread exiting.")
         free_list_queue.put(None) # Sentinel value to unblock the main thread
 
-# --- [MODIFIED] Main logic to interleave frames within each list ---
+# --- [MODIFIED] Main logic using batch transfers for high performance ---
 def main():
     s_control = None
-    notify_thread = None # Initialize to avoid reference-before-assignment in finally
+    notify_thread = None
     try:
         print(f"[CLIENT] Resolving {HOST}...")
         ip = socket.gethostbyname(HOST)
@@ -104,26 +127,26 @@ def main():
 
         print("[CLIENT] Sending RESET...")
         op_Z_reset(s_control)
-        nframes = 200
+        nframes = 500
 
-        # --- [MODIFIED] 1. Initial Priming with interleaved frames ---
+        # --- [MODIFIED] 1. Initial Priming using a single batch transfer ---
         for list_id_to_prime in [0, 1]:
             print(f"[*] Main thread waiting for an IDLE slot...")
             free_id = free_list_queue.get(timeout=5.0)
             if free_id is None: raise ConnectionError("Notify thread died")
             
-            print(f"    -> Priming list {free_id} with interleaved frames ({nframes} frames)")
+            print(f"    -> Priming list {free_id} with a batch of {nframes} frames...")
             op_B_begin(s_control, free_id, nframes)
             
-            # Loop with an index 'i' to decide which frame to send on each iteration
-            for i in range(nframes):
-                # If i is even, send frame_A. If i is odd, send frame_B.
-                frames_to_send = frame_A() if i % 2 == 0 else frame_B()
-                op_P_push(s_control, free_id, frames_to_send)
+            # Build the entire batch in memory first
+            batch_data = build_p_command_batch(free_id, nframes)
+            print(f"    -> Batch created ({len(batch_data)} bytes). Sending now...")
+            # Send the entire batch in a single network operation
+            s_control.sendall(batch_data)
                 
             op_E_end(s_control, free_id)
         
-        # --- [MODIFIED] 2. Main event-driven loop with interleaved frames ---
+        # --- [MODIFIED] 2. Main event-driven loop using a single batch transfer ---
         print("\n[CLIENT] Entering event-driven loop... Press Ctrl+C to exit.")
         while True:
             print(f"[*] Main thread waiting for a list to become free...")
@@ -133,14 +156,13 @@ def main():
                 print("[CLIENT] Notification channel closed. Exiting.")
                 break
 
-            print(f"    -> IDLE signal for list {free_list_id} received. Preloading with interleaved frames...")
+            print(f"    -> IDLE signal for list {free_list_id} received. Preloading with a batch...")
             op_B_begin(s_control, free_list_id, nframes)
             
-            # Loop with an index 'i' to decide which frame to send on each iteration
-            for i in range(nframes):
-                # If i is even, send frame_A. If i is odd, send frame_B.
-                frames_to_send = frame_A() if i % 2 == 0 else frame_B()
-                op_P_push(s_control, free_list_id, frames_to_send)
+            # Build and send the batch in the same way
+            batch_data = build_p_command_batch(free_list_id, nframes)
+            print(f"    -> Batch created ({len(batch_data)} bytes). Sending now...")
+            s_control.sendall(batch_data)
             
             op_E_end(s_control, free_list_id)
 
@@ -148,8 +170,7 @@ def main():
 
     except (KeyboardInterrupt, queue.Empty):
         print("\n[CLIENT] Operation stopped or timed out.")
-    except (ConnectionError, BrokenPipeError) as e:
-        print(f"\n[CLIENT] Connection error: {e}")
+    # ... (rest of exception handling and finally block is the same) ...
     finally:
         print("[CLIENT] Closing connection.")
         if s_control: s_control.close()
