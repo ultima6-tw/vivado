@@ -1,5 +1,5 @@
 /*
- * awg_server_raw_queue.c — FINAL STABLE VERSION
+ * awg_server_raw_queue.c — MODIFIED FOR DETAILED LOGGING
  * This version contains all fixes for compilation, shutdown, memory management, and race conditions.
  */
 #define _GNU_SOURCE
@@ -18,15 +18,64 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/time.h> // --- [NEW] --- For gettimeofday()
 
 #include "awg_core.h"
 #include "awg_server_raw_shared.h"
 
+// --- [MODIFIED] DPRINT macro to include a timestamp ---
 #ifdef DEBUG
-  #define DPRINT(fmt, ...) printf("[QSRV] " fmt, ##__VA_ARGS__)
+    // Helper function to get a formatted timestamp
+    static inline char* get_timestamp(char* buffer, size_t len) {
+        struct timeval tv;
+        struct tm tm_info;
+        gettimeofday(&tv, NULL);
+        localtime_r(&tv.tv_sec, &tm_info);
+        int ms = tv.tv_usec / 1000;
+        snprintf(buffer, len, "[%02d:%02d:%02d.%03d]", tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec, ms);
+        return buffer;
+    }
+    #define DPRINT(fmt, ...) do { \
+        char ts_buf[32]; \
+        printf("%s [QSRV] " fmt, get_timestamp(ts_buf, sizeof(ts_buf)), ##__VA_ARGS__); \
+    } while (0)
 #else
   #define DPRINT(fmt, ...) do{}while(0)
 #endif
+
+// --- [NEW] Helper function to print a hex dump ---
+#ifdef DEBUG
+static void print_hex_dump(const char *desc, const void *addr, int len) {
+    int i;
+    unsigned char buff[17];
+    unsigned char *pc = (unsigned char*)addr;
+
+    if (desc != NULL) DPRINT("%s (%d bytes):\n", desc, len);
+    if (len == 0) {
+        DPRINT("  ZERO LENGTH\n");
+        return;
+    }
+    for (i = 0; i < len; i++) {
+        if ((i % 16) == 0) {
+            if (i != 0) DPRINT("  %s\n", buff);
+            DPRINT("  %04x ", i);
+        }
+        DPRINT(" %02x", pc[i]);
+        if ((pc[i] < 0x20) || (pc[i] > 0x7e)) {
+            buff[i % 16] = '.';
+        } else {
+            buff[i % 16] = pc[i];
+        }
+        buff[(i % 16) + 1] = '\0';
+    }
+    while ((i % 16) != 0) {
+        DPRINT("   ");
+        i++;
+    }
+    DPRINT("  %s\n", buff);
+}
+#endif
+
 
 // --- [NEW] Word packing macros and zero-gain frame definition ---
 #define PACK_WORD(cmd, ch, tone, data20) \
@@ -147,6 +196,12 @@ static bool prepare_list_for_preload(awg_list_t *L, uint32_t total_frames) {
     DPRINT("Preparing list for preload with %u frames.\n", total_frames);
     clear_list_fully(L); // Always start from a completely clean slate
     
+    // --- [MODIFIED] Added upper limit check for total_frames to prevent DoS attack ---
+    if (total_frames > 2000000) { // Example limit of 2 million frames
+        DPRINT("ERROR: total_frames (%u) exceeds the limit.\n", total_frames);
+        return false;
+    }
+
     L->offsets = calloc(total_frames, sizeof(uint32_t));
     L->counts  = calloc(total_frames, sizeof(uint16_t));
 
@@ -299,7 +354,12 @@ static void do_reset(){
 }
 
 static bool do_preload_begin(uint8_t list_id, uint32_t total_frames){
-    if (list_id > 1 || total_frames == 0) return false;
+    if (list_id > 1) return false;
+    // --- [MODIFIED] Added DoS check from another conversation ---
+    if (total_frames == 0 || total_frames > 2000000) {
+        DPRINT("ERROR: Invalid total_frames (%u) in BEGIN command.\n", total_frames);
+        return false;
+    }
     pthread_mutex_lock(&G.mtx);
     bool ok = prepare_list_for_preload(&G.list[list_id], total_frames);
     pthread_mutex_unlock(&G.mtx);
@@ -311,30 +371,65 @@ static bool do_preload_begin(uint8_t list_id, uint32_t total_frames){
 
         g_loading_in_progress[list_id] = true;
     }
-    DPRINT("BEGIN for list %u. OK=%d\n", (unsigned)list_id, ok);
+    DPRINT("BEGIN for list %u with %u frames. OK=%d\n", (unsigned)list_id, total_frames, ok);
     return ok;
 }
 
+// --- [MODIFIED] do_preload_push function with detailed logging ---
 static bool do_preload_push(int fd) {
     uint8_t hdr[3];
     if (read_n_timeout(fd, hdr, 3, IO_TIMEOUT_MS) <= 0) return false;
+    
+    // --- [DEBUG] Print raw header bytes ---
+    print_hex_dump("PUSH Header Raw Bytes", hdr, 3);
+
     uint8_t  list_id; memcpy(&list_id, &hdr[0], sizeof(list_id));
     uint16_t be_count; memcpy(&be_count, &hdr[1], sizeof(be_count));
     uint16_t count = be16_to_host(be_count);
-    if (list_id > 1 || count == 0 || count > MAX_WORDS_PER_FRAME) return false;
+
+    // --- [DEBUG] Print decoded header info ---
+    DPRINT("PUSH Hdr Decoded -> list_id: %u, be_count: 0x%04X, host_count: %u\n", 
+           (unsigned)list_id, be_count, count);
+
+    if (list_id > 1 || count == 0 || count > MAX_WORDS_PER_FRAME) {
+        DPRINT("ERROR: Invalid header in PUSH command.\n");
+        return false;
+    }
+    
+    uint32_t network_order_tmp[MAX_WORDS_PER_FRAME];
+    if (read_n_timeout(fd, network_order_tmp, count * 4, IO_TIMEOUT_MS) <= 0) return false;
+
+    // --- [DEBUG] Print a Hex Dump of the raw payload received from network ---
+    print_hex_dump("PUSH Payload Raw Bytes (Big-Endian)", network_order_tmp, count * 4);
+
     uint32_t tmp[MAX_WORDS_PER_FRAME];
-    if (read_n_timeout(fd, tmp, count * 4, IO_TIMEOUT_MS) <= 0) return false;
-    for (int i = 0; i < count; ++i) tmp[i] = be32_to_host(tmp[i]);
+    for (int i = 0; i < count; ++i) tmp[i] = be32_to_host(network_order_tmp[i]);
+
+    // --- [DEBUG] Print the decoded, host-order words ---
+    #ifdef DEBUG
+    for (int i = 0; i < count; ++i) {
+        DPRINT("PUSH Payload Decoded Word[%d]: 0x%08X\n", i, tmp[i]);
+    }
+    #endif
+
     pthread_mutex_lock(&G.mtx);
     awg_list_t *L = &G.list[list_id];
+    
+    // --- [DEBUG] Print list status before push ---
+    DPRINT("List %u status before push: %u/%u frames loaded.\n", (unsigned)list_id, L->loaded_frames, L->total_frames);
+
     bool ok = push_frame(L, tmp, count);
+
     if (ok && L->loaded_frames > 0 && L->loaded_frames == L->total_frames) {
+        DPRINT("List %u is now fully loaded. Marking as READY.\n", (unsigned)list_id);
         L->ready = true;
         pthread_mutex_lock(&g_notify_mutex);
         g_list_status[list_id] = LIST_READY;
         pthread_mutex_unlock(&g_notify_mutex);
         send_status_update(list_id);
+        g_loading_in_progress[list_id] = false; // Fully loaded, no longer "in progress"
         if (!G.playing && list_id == 0) {
+            DPRINT("Auto-starting player for list 0.\n");
             G.playing = true; G.cur_list = 0; G.next_list = 1; G.cur_frame = 0;
             start_player_if_needed();
         }
@@ -343,18 +438,28 @@ static bool do_preload_push(int fd) {
     return ok;
 }
 
+
 static bool do_preload_end(uint8_t list_id) {
     if (list_id > 1) return false;
+    DPRINT("END received for list %u.\n", (unsigned)list_id);
     pthread_mutex_lock(&G.mtx);
     awg_list_t *L = &G.list[list_id];
-    if (L->loaded_frames == 0){ pthread_mutex_unlock(&G.mtx); return false; }
-    if (!L->ready){ L->ready = true; }
+    if (L->loaded_frames == 0){ 
+        DPRINT("ERROR: END received for an empty list %u.\n", (unsigned)list_id);
+        pthread_mutex_unlock(&G.mtx); 
+        return false; 
+    }
+    if (!L->ready){ 
+        DPRINT("List %u marked as READY by END command.\n", (unsigned)list_id);
+        L->ready = true; 
+    }
     pthread_mutex_lock(&g_notify_mutex);
     g_list_status[list_id] = LIST_READY;
     pthread_mutex_unlock(&g_notify_mutex);
     send_status_update(list_id);
     g_loading_in_progress[list_id] = false;
     if (!G.playing && list_id == 0) {
+        DPRINT("Auto-starting player for list 0 after END.\n");
         G.playing = true; G.cur_list = 0; G.next_list = 1; G.cur_frame = 0;
         start_player_if_needed();
     }
@@ -367,7 +472,10 @@ static void serve_client(int fd){
     for(;;){
         uint8_t op;
         int rc = read_n_timeout(fd, &op, 1, IO_TIMEOUT_MS);
-        if (rc <= 0) { break; }
+        if (rc <= 0) { 
+            DPRINT("read_n_timeout returned %d, client likely disconnected.\n", rc);
+            break; 
+        }
         switch(op){
             case 'B': {
                 uint8_t b[5]; if(read_n_timeout(fd,b,5,IO_TIMEOUT_MS)<=0) goto drop;
@@ -380,7 +488,15 @@ static void serve_client(int fd){
                 if (!do_preload_end(id)) goto drop;
             } break;
             case 'Z': do_reset(); break;
-            default: goto drop;
+            case 'X': { // --- [NEW] --- Shutdown command
+                DPRINT("SHUTDOWN command received. Initiating system poweroff.\n");
+                do_reset(); // Clean up FPGA state first
+                system("poweroff");
+                goto drop;
+            } break;
+            default: 
+                DPRINT("ERROR: Unknown command received: 0x%02X\n", op);
+                goto drop;
         }
     }
 drop:
@@ -406,11 +522,15 @@ static void* accept_loop_queue(void *arg) {
             
             // For any other error (like EBADF from a closed socket),
             // assume it's a shutdown signal and exit the loop.
-            perror("[QSRV] accept");
+            DPRINT("accept() failed with error %d (%s), exiting accept loop.\n", errno, strerror(errno));
             break;
         }
         
         // This part is for when a client is connected
+        if (g_active_client_fd >= 0) {
+            DPRINT("Another client tried to connect. Closing old fd=%d and accepting new fd=%d.\n", g_active_client_fd, fd);
+            close(g_active_client_fd);
+        }
         g_active_client_fd = fd;
         serve_client(fd);
         g_active_client_fd = -1;
