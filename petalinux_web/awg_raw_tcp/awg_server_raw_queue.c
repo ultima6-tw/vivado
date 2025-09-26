@@ -18,7 +18,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/time.h> // --- [NEW] --- For gettimeofday()
+#include <sys/time.h> // For gettimeofday()
 
 #include "awg_core.h"
 #include "awg_server_raw_shared.h"
@@ -380,8 +380,10 @@ static bool do_preload_push(int fd) {
     uint8_t hdr[3];
     if (read_n_timeout(fd, hdr, 3, IO_TIMEOUT_MS) <= 0) return false;
     
+#ifdef DEBUG
     // --- [DEBUG] Print raw header bytes ---
     print_hex_dump("PUSH Header Raw Bytes", hdr, 3);
+#endif
 
     uint8_t  list_id; memcpy(&list_id, &hdr[0], sizeof(list_id));
     uint16_t be_count; memcpy(&be_count, &hdr[1], sizeof(be_count));
@@ -399,18 +401,18 @@ static bool do_preload_push(int fd) {
     uint32_t network_order_tmp[MAX_WORDS_PER_FRAME];
     if (read_n_timeout(fd, network_order_tmp, count * 4, IO_TIMEOUT_MS) <= 0) return false;
 
-    // --- [DEBUG] Print a Hex Dump of the raw payload received from network ---
+#ifdef DEBUG
+    // --- [DEBUG] Print a Hex Dump of the raw payload ---
     print_hex_dump("PUSH Payload Raw Bytes (Big-Endian)", network_order_tmp, count * 4);
-
+#endif
     uint32_t tmp[MAX_WORDS_PER_FRAME];
     for (int i = 0; i < count; ++i) tmp[i] = be32_to_host(network_order_tmp[i]);
 
+#ifdef DEBUG
     // --- [DEBUG] Print the decoded, host-order words ---
-    #ifdef DEBUG
     for (int i = 0; i < count; ++i) {
         DPRINT("PUSH Payload Decoded Word[%d]: 0x%08X\n", i, tmp[i]);
     }
-    #endif
 
     pthread_mutex_lock(&G.mtx);
     awg_list_t *L = &G.list[list_id];
@@ -423,11 +425,12 @@ static bool do_preload_push(int fd) {
     if (ok && L->loaded_frames > 0 && L->loaded_frames == L->total_frames) {
         DPRINT("List %u is now fully loaded. Marking as READY.\n", (unsigned)list_id);
         L->ready = true;
+        g_loading_in_progress[list_id] = false;
         pthread_mutex_lock(&g_notify_mutex);
         g_list_status[list_id] = LIST_READY;
         pthread_mutex_unlock(&g_notify_mutex);
         send_status_update(list_id);
-        g_loading_in_progress[list_id] = false; // Fully loaded, no longer "in progress"
+
         if (!G.playing && list_id == 0) {
             DPRINT("Auto-starting player for list 0.\n");
             G.playing = true; G.cur_list = 0; G.next_list = 1; G.cur_frame = 0;
