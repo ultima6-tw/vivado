@@ -14,7 +14,7 @@ import threading
 import queue
 
 # ---------- Connection settings ----------
-HOST = "wavegenz7-2.local"
+HOST = "wavegenz7.local"
 CONTROL_PORT = 9100
 NOTIFY_PORT = 9101
 CONNECT_TIMEOUT = 3.0
@@ -127,7 +127,7 @@ def main():
 
         print("[CLIENT] Sending RESET...")
         op_Z_reset(s_control)
-        nframes = 1000
+        nframes = 100
 
         # --- [MODIFIED] 1. Initial Priming using a single batch transfer ---
         for list_id_to_prime in [0, 1]:
