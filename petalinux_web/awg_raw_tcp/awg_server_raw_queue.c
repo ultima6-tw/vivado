@@ -18,7 +18,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/time.h> // For gettimeofday()
+#include <sys/time.h> // --- [MODIFIED] --- For gettimeofday()
 
 #include "awg_core.h"
 #include "awg_server_raw_shared.h"
@@ -43,7 +43,7 @@
   #define DPRINT(fmt, ...) do{}while(0)
 #endif
 
-// --- [NEW] Helper function to print a hex dump ---
+// --- [NEW] Helper function to print a hex dump, wrapped in #ifdef ---
 #ifdef DEBUG
 static void print_hex_dump(const char *desc, const void *addr, int len) {
     int i;
@@ -51,8 +51,8 @@ static void print_hex_dump(const char *desc, const void *addr, int len) {
     unsigned char *pc = (unsigned char*)addr;
 
     if (desc != NULL) DPRINT("%s (%d bytes):\n", desc, len);
-    if (len == 0) {
-        DPRINT("  ZERO LENGTH\n");
+    if (len <= 0) {
+        DPRINT("  ZERO or NEGATIVE LENGTH: %d\n", len);
         return;
     }
     for (i = 0; i < len; i++) {
@@ -154,7 +154,7 @@ static bool g_accept_thread_running = false;
 static volatile int g_active_client_fd = -1;
 static volatile bool g_loading_in_progress[2] = { false, false };
 
-// --- [FIX #1] Add forward declarations for static functions ---
+// --- Forward declarations for static functions ---
 static bool prepare_list_for_preload(awg_list_t *L, uint32_t total_frames);
 static void start_player_if_needed();
 
@@ -167,7 +167,10 @@ static int read_n_timeout(int fd, void *buf, size_t n, int timeout_ms){
   while(got < n){
     struct pollfd pfd = {.fd=fd,.events=POLLIN};
     int pr = poll(&pfd,1,timeout_ms);
-    if (pr==0) return -2;
+    if (pr==0) { 
+        DPRINT("read_n_timeout: timed out after %d ms\n", timeout_ms);
+        return -2; // Timeout
+    }
     if (pr<0){ if(errno==EINTR) continue; return -1; }
     if (pfd.revents & (POLLERR|POLLHUP|POLLNVAL)) return 0;
     ssize_t r = recv(fd, p+got, n-got, 0);
@@ -186,28 +189,23 @@ static inline uint16_t host_to_be16(uint16_t x){ return htons(x); }
 static void clear_list_fully(awg_list_t *L) {
     DPRINT("Fully clearing list (freeing all buffers).\n");
     free(L->offsets);
+    L->offsets = NULL;
     free(L->counts);
+    L->counts = NULL;
     free(L->words);
+    L->words = NULL;
     memset(L, 0, sizeof(awg_list_t));
 }
 
-// This function PREPARES a list for a new preload.
 static bool prepare_list_for_preload(awg_list_t *L, uint32_t total_frames) {
     DPRINT("Preparing list for preload with %u frames.\n", total_frames);
-    clear_list_fully(L); // Always start from a completely clean slate
-    
-    // --- [MODIFIED] Added upper limit check for total_frames to prevent DoS attack ---
-    if (total_frames > 2000000) { // Example limit of 2 million frames
-        DPRINT("ERROR: total_frames (%u) exceeds the limit.\n", total_frames);
-        return false;
-    }
-
+    clear_list_fully(L);
     L->offsets = calloc(total_frames, sizeof(uint32_t));
     L->counts  = calloc(total_frames, sizeof(uint16_t));
 
     if (!L->offsets || !L->counts) {
-        DPRINT("Failed to allocate metadata for list.\n");
-        clear_list_fully(L); // Ensure clean state on failure
+        DPRINT("ERROR: Failed to allocate metadata for list.\n");
+        clear_list_fully(L);
         return false;
     }
     L->total_frames = total_frames;
@@ -220,7 +218,10 @@ static bool ensure_words_cap(awg_list_t *L, uint32_t need_more){
     uint32_t cap  = L->words_cap ? L->words_cap : GROW_WORDS_STEP;
     while (cap < want) cap += GROW_WORDS_STEP;
     uint32_t *nw = (uint32_t*)realloc(L->words, cap * sizeof(uint32_t));
-    if (!nw) return false;
+    if (!nw) {
+        DPRINT("ERROR: Failed to realloc words buffer.\n");
+        return false;
+    }
     L->words = nw;
     L->words_cap = cap;
     return true;
@@ -228,7 +229,10 @@ static bool ensure_words_cap(awg_list_t *L, uint32_t need_more){
 
 static bool push_frame(awg_list_t *L, const uint32_t *w, uint16_t count){
     if (!L || !L->offsets || !L->counts) return false;
-    if (L->loaded_frames >= L->total_frames) return false;
+    if (L->loaded_frames >= L->total_frames) {
+        DPRINT("ERROR: Attempt to push frame when list is already full (%u/%u).\n", L->loaded_frames, L->total_frames);
+        return false;
+    }
     if (count == 0 || count > MAX_WORDS_PER_FRAME) return false;
     if (!ensure_words_cap(L, count)) return false;
     uint32_t off = L->words_used;
@@ -240,7 +244,6 @@ static bool push_frame(awg_list_t *L, const uint32_t *w, uint16_t count){
     return true;
 }
 
-// --- [NEW] Helper function to load a list with zero-gain frames ---
 static bool load_zero_gain_list(awg_list_t *L, uint32_t num_frames) {
     if (!prepare_list_for_preload(L, num_frames)) {
         return false;
@@ -274,6 +277,7 @@ static void *player_thread(void *arg){
         ts.tv_nsec += (long)us * 1000L;
         while (ts.tv_nsec >= 1000000000L){ ts.tv_nsec -= 1000000000L; ts.tv_sec++; }
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+        
         pthread_mutex_lock(&G.mtx);
 
         if (!G.playing) {
@@ -282,39 +286,48 @@ static void *player_thread(void *arg){
         }
 
         awg_list_t *current_list = &G.list[G.cur_list];
-        if (current_list->loaded_frames == 0 || G.cur_frame >= current_list->loaded_frames) {
+        if (!current_list->ready || G.cur_frame >= current_list->total_frames) {
             int finished_list_idx = G.cur_list;
             awg_list_t *next_list = &G.list[G.next_list];
-            if (next_list->ready && next_list->loaded_frames > 0) {
+            
+            if (next_list->ready && next_list->total_frames > 0) {
                 DPRINT("Switching from list %d to %d\n", G.cur_list, G.next_list);
-                G.cur_list = G.next_list; G.next_list = finished_list_idx; G.cur_frame = 0;
+                G.cur_list = G.next_list; 
+                G.next_list = finished_list_idx; 
+                G.cur_frame = 0;
             } else {
                 DPRINT("End of list %d, no next ready -> stopping.\n", finished_list_idx);
                 G.playing = false;
             }
             clear_list_fully(current_list);
+            
             pthread_mutex_unlock(&G.mtx);
+            
             pthread_mutex_lock(&g_notify_mutex);
             g_list_status[finished_list_idx] = LIST_IDLE;
             pthread_mutex_unlock(&g_notify_mutex);
             send_status_update(finished_list_idx);
             continue;
-        } else {
+        } 
+        
+        if (current_list->loaded_frames > G.cur_frame) {
             uint32_t off = current_list->offsets[G.cur_frame];
             uint16_t cnt = current_list->counts[G.cur_frame];
             uint32_t *w  = &current_list->words[off];
+            G.cur_frame++;
             pthread_mutex_unlock(&G.mtx);
             if(w) awg_send_words32(w, cnt);
-            pthread_mutex_lock(&G.mtx);
-            G.cur_frame++;
+        } else {
+            pthread_mutex_unlock(&G.mtx);
         }
-        pthread_mutex_unlock(&G.mtx);
     }
+    DPRINT("Player thread exiting.\n");
     return NULL;
 }
 
 static void start_player_if_needed(){
   if (!G.player_thread_running){
+    DPRINT("Starting player thread...\n");
     pthread_create(&G.player_thread_h, NULL, player_thread, NULL);
     G.player_thread_running = true;
   }
@@ -322,66 +335,79 @@ static void start_player_if_needed(){
 
 static void cancel_preload_and_mark_idle(int list_id) {
     if (list_id < 0 || list_id > 1) return;
+    
+    if (!g_loading_in_progress[list_id]) return;
 
-    pthread_mutex_lock(&G.mtx);
-    clear_list_fully(&G.list[list_id]);          // clear no load complate data
-    pthread_mutex_unlock(&G.mtx);
-
+    DPRINT("CANCEL preload on list %d -> IDLE (client disconnected)\n", list_id);
     g_loading_in_progress[list_id] = false;
 
+    pthread_mutex_lock(&G.mtx);
+    clear_list_fully(&G.list[list_id]);
+    pthread_mutex_unlock(&G.mtx);
+
     pthread_mutex_lock(&g_notify_mutex);
-    g_list_status[list_id] = LIST_IDLE;          // change g_list_status
+    g_list_status[list_id] = LIST_IDLE;
     pthread_mutex_unlock(&g_notify_mutex);
 
     send_status_update(list_id);
-    DPRINT("CANCEL preload on list %d -> IDLE (timeout/error)\n", list_id);
 }
 
 static void do_reset(){
+    DPRINT("RESET command received.\n");
     pthread_mutex_lock(&G.mtx);
-    G.playing=false; G.cur_list=0; G.next_list=1; G.cur_frame=0;
+    G.playing=false; 
+    G.cur_list=0; 
+    G.next_list=1; 
+    G.cur_frame=0;
     clear_list_fully(&G.list[0]);
     clear_list_fully(&G.list[1]);
     pthread_mutex_unlock(&G.mtx);
-    pthread_mutex_lock(&g_notify_mutex);
-    g_list_status[0] = LIST_IDLE; g_list_status[1] = LIST_IDLE;
-    pthread_mutex_unlock(&g_notify_mutex);
-    send_status_update(0);
-    send_status_update(1);
+    
     g_loading_in_progress[0] = false;
     g_loading_in_progress[1] = false;
-    DPRINT("RESET\n");
+
+    pthread_mutex_lock(&g_notify_mutex);
+    g_list_status[0] = LIST_IDLE; 
+    g_list_status[1] = LIST_IDLE;
+    pthread_mutex_unlock(&g_notify_mutex);
+    
+    send_status_update(0);
+    send_status_update(1);
 }
 
 static bool do_preload_begin(uint8_t list_id, uint32_t total_frames){
     if (list_id > 1) return false;
-    // --- [MODIFIED] Added DoS check from another conversation ---
-    if (total_frames == 0 || total_frames > 2000000) {
-        DPRINT("ERROR: Invalid total_frames (%u) in BEGIN command.\n", total_frames);
+    if (total_frames == 0 || total_frames > 2000000) { 
+        DPRINT("ERROR: Invalid total_frames (%u) in BEGIN command for list %u.\n", total_frames, (unsigned)list_id);
         return false;
     }
+
+    DPRINT("BEGIN for list %u with %u frames.\n", (unsigned)list_id, total_frames);
+    
     pthread_mutex_lock(&G.mtx);
     bool ok = prepare_list_for_preload(&G.list[list_id], total_frames);
     pthread_mutex_unlock(&G.mtx);
+    
     if (ok) {
+        g_loading_in_progress[list_id] = true;
         pthread_mutex_lock(&g_notify_mutex);
         g_list_status[list_id] = LIST_LOADING;
         pthread_mutex_unlock(&g_notify_mutex);
         send_status_update(list_id);
-
-        g_loading_in_progress[list_id] = true;
     }
-    DPRINT("BEGIN for list %u with %u frames. OK=%d\n", (unsigned)list_id, total_frames, ok);
     return ok;
 }
 
-// --- [MODIFIED] do_preload_push function with detailed logging ---
+// --- [MODIFIED] do_preload_push function with conditional logging ---
 static bool do_preload_push(int fd) {
     uint8_t hdr[3];
-    if (read_n_timeout(fd, hdr, 3, IO_TIMEOUT_MS) <= 0) return false;
+    int rc = read_n_timeout(fd, hdr, 3, IO_TIMEOUT_MS);
+    if (rc <= 0) {
+        if (rc == -2) DPRINT("Timeout while reading PUSH header.\n");
+        return false;
+    }
     
 #ifdef DEBUG
-    // --- [DEBUG] Print raw header bytes ---
     print_hex_dump("PUSH Header Raw Bytes", hdr, 3);
 #endif
 
@@ -389,7 +415,6 @@ static bool do_preload_push(int fd) {
     uint16_t be_count; memcpy(&be_count, &hdr[1], sizeof(be_count));
     uint16_t count = be16_to_host(be_count);
 
-    // --- [DEBUG] Print decoded header info ---
     DPRINT("PUSH Hdr Decoded -> list_id: %u, be_count: 0x%04X, host_count: %u\n", 
            (unsigned)list_id, be_count, count);
 
@@ -399,41 +424,48 @@ static bool do_preload_push(int fd) {
     }
     
     uint32_t network_order_tmp[MAX_WORDS_PER_FRAME];
-    if (read_n_timeout(fd, network_order_tmp, count * 4, IO_TIMEOUT_MS) <= 0) return false;
+    rc = read_n_timeout(fd, network_order_tmp, count * 4, IO_TIMEOUT_MS);
+    if (rc <= 0) {
+        if (rc == -2) DPRINT("Timeout while reading PUSH payload.\n");
+        return false;
+    }
 
 #ifdef DEBUG
-    // --- [DEBUG] Print a Hex Dump of the raw payload ---
     print_hex_dump("PUSH Payload Raw Bytes (Big-Endian)", network_order_tmp, count * 4);
 #endif
+
     uint32_t tmp[MAX_WORDS_PER_FRAME];
     for (int i = 0; i < count; ++i) tmp[i] = be32_to_host(network_order_tmp[i]);
 
 #ifdef DEBUG
-    // --- [DEBUG] Print the decoded, host-order words ---
     for (int i = 0; i < count; ++i) {
         DPRINT("PUSH Payload Decoded Word[%d]: 0x%08X\n", i, tmp[i]);
     }
+#endif
 
     pthread_mutex_lock(&G.mtx);
     awg_list_t *L = &G.list[list_id];
     
-    // --- [DEBUG] Print list status before push ---
     DPRINT("List %u status before push: %u/%u frames loaded.\n", (unsigned)list_id, L->loaded_frames, L->total_frames);
 
     bool ok = push_frame(L, tmp, count);
 
-    if (ok && L->loaded_frames > 0 && L->loaded_frames == L->total_frames) {
+    if (ok && L->loaded_frames == L->total_frames) {
         DPRINT("List %u is now fully loaded. Marking as READY.\n", (unsigned)list_id);
         L->ready = true;
-        g_loading_in_progress[list_id] = false;
+        g_loading_in_progress[list_id] = false; 
+        
         pthread_mutex_lock(&g_notify_mutex);
         g_list_status[list_id] = LIST_READY;
         pthread_mutex_unlock(&g_notify_mutex);
         send_status_update(list_id);
-
-        if (!G.playing && list_id == 0) {
-            DPRINT("Auto-starting player for list 0.\n");
-            G.playing = true; G.cur_list = 0; G.next_list = 1; G.cur_frame = 0;
+        
+        if (!G.playing) {
+            DPRINT("This is the first ready list. Auto-starting player...\n");
+            G.playing = true; 
+            G.cur_list = list_id; 
+            G.next_list = 1 - list_id; 
+            G.cur_frame = 0;
             start_player_if_needed();
         }
     }
@@ -445,6 +477,9 @@ static bool do_preload_push(int fd) {
 static bool do_preload_end(uint8_t list_id) {
     if (list_id > 1) return false;
     DPRINT("END received for list %u.\n", (unsigned)list_id);
+    
+    g_loading_in_progress[list_id] = false;
+
     pthread_mutex_lock(&G.mtx);
     awg_list_t *L = &G.list[list_id];
     if (L->loaded_frames == 0){ 
@@ -456,14 +491,18 @@ static bool do_preload_end(uint8_t list_id) {
         DPRINT("List %u marked as READY by END command.\n", (unsigned)list_id);
         L->ready = true; 
     }
+
     pthread_mutex_lock(&g_notify_mutex);
     g_list_status[list_id] = LIST_READY;
     pthread_mutex_unlock(&g_notify_mutex);
     send_status_update(list_id);
-    g_loading_in_progress[list_id] = false;
-    if (!G.playing && list_id == 0) {
-        DPRINT("Auto-starting player for list 0 after END.\n");
-        G.playing = true; G.cur_list = 0; G.next_list = 1; G.cur_frame = 0;
+
+    if (!G.playing) {
+        DPRINT("This is the first ready list. Auto-starting player after END.\n");
+        G.playing = true; 
+        G.cur_list = list_id; 
+        G.next_list = 1 - list_id; 
+        G.cur_frame = 0;
         start_player_if_needed();
     }
     pthread_mutex_unlock(&G.mtx);
@@ -472,28 +511,38 @@ static bool do_preload_end(uint8_t list_id) {
 
 static void serve_client(int fd){
     DPRINT("client connected (fd=%d)\n", fd);
+    g_loading_in_progress[0] = false;
+    g_loading_in_progress[1] = false;
+
     for(;;){
         uint8_t op;
         int rc = read_n_timeout(fd, &op, 1, IO_TIMEOUT_MS);
         if (rc <= 0) { 
-            DPRINT("read_n_timeout returned %d, client likely disconnected.\n", rc);
+            if (rc == -2) DPRINT("Timeout waiting for command from client.\n");
+            else DPRINT("read_n_timeout returned %d, client likely disconnected.\n", rc);
             break; 
         }
         switch(op){
             case 'B': {
-                uint8_t b[5]; if(read_n_timeout(fd,b,5,IO_TIMEOUT_MS)<=0) goto drop;
+                uint8_t b[5]; 
+                rc = read_n_timeout(fd,b,5,IO_TIMEOUT_MS);
+                if(rc <= 0) goto drop;
                 uint32_t tf; memcpy(&tf, &b[1], sizeof(tf));
                 if (!do_preload_begin(b[0], be32_to_host(tf))) goto drop;
             } break;
-            case 'P': if (!do_preload_push(fd)) goto drop; break;
+            case 'P': {
+                if (!do_preload_push(fd)) goto drop; 
+            } break;
             case 'E': {
-                uint8_t id; if(read_n_timeout(fd,&id,1,IO_TIMEOUT_MS)<=0) goto drop;
+                uint8_t id; 
+                rc = read_n_timeout(fd,&id,1,IO_TIMEOUT_MS);
+                if(rc <= 0) goto drop;
                 if (!do_preload_end(id)) goto drop;
             } break;
             case 'Z': do_reset(); break;
-            case 'X': { // --- [NEW] --- Shutdown command
+            case 'X': {
                 DPRINT("SHUTDOWN command received. Initiating system poweroff.\n");
-                do_reset(); // Clean up FPGA state first
+                do_reset(); 
                 system("poweroff");
                 goto drop;
             } break;
@@ -513,23 +562,15 @@ drop:
 // --- [MODIFIED] Make the accept loop more robust on error ---
 static void* accept_loop_queue(void *arg) {
     (void)arg;
-    while(1){ // Loop indefinitely until an error occurs
+    while(!g_stop_queue){
         int fd = accept(g_listen_queue, NULL, NULL);
         if (fd < 0){
-            // If interrupted by our signal, just continue and re-check loop condition
-            if (errno == EINTR) {
-                // Check the global stop flag now
-                if(g_stop_queue) break;
-                continue;
-            }
-            
-            // For any other error (like EBADF from a closed socket),
-            // assume it's a shutdown signal and exit the loop.
+            if (errno == EINTR) continue;
+            if (g_stop_queue) break;
             DPRINT("accept() failed with error %d (%s), exiting accept loop.\n", errno, strerror(errno));
             break;
         }
         
-        // This part is for when a client is connected
         if (g_active_client_fd >= 0) {
             DPRINT("Another client tried to connect. Closing old fd=%d and accepting new fd=%d.\n", g_active_client_fd, fd);
             close(g_active_client_fd);
@@ -537,9 +578,6 @@ static void* accept_loop_queue(void *arg) {
         g_active_client_fd = fd;
         serve_client(fd);
         g_active_client_fd = -1;
-
-        // After a client disconnects, check if we should stop
-        if(g_stop_queue) break;
     }
     DPRINT("Accept loop thread exiting.\n");
     return NULL;
@@ -550,60 +588,49 @@ int start_queue_server(unsigned short port){
   g_stop_queue = 0;
   struct sigaction sa; memset(&sa, 0, sizeof(sa));
   sa.sa_handler = dummy_signal_handler;
-  if (sigaction(SIGUSR1, &sa, NULL) == -1) { perror("[QSRV] sigaction"); return -1; }
+  if (sigaction(SIGUSR1, &sa, NULL) == -1) { DPRINT("sigaction failed: %s\n", strerror(errno)); return -1; }
   
   init_lists();
-  start_player_if_needed(); // Player thread is now running, but idle (G.playing is false)
+  start_player_if_needed(); 
 
   // --- [NEW] Synchronously flush PL buffers with zero-gain waveforms on startup ---
   DPRINT("Priming PL buffers with zero-gain waveforms on startup...\n");
   
-  // --- Flush List 0 ---
-  pthread_mutex_lock(&G.mtx);
-  DPRINT("Priming PL buffer for list 0...\n");
-  // No need to clear lists, init_lists() just did that.
-  if (load_zero_gain_list(&G.list[0], SHUTDOWN_FLUSH_FRAMES)) {
-      G.cur_list = 0;
-      G.next_list = 1;
-      G.cur_frame = 0;
-      G.playing = true; // Start playing the silent list
-  }
-  pthread_mutex_unlock(&G.mtx);
+  if (G.player_thread_running) {
+      // --- Flush List 0 ---
+      pthread_mutex_lock(&G.mtx);
+      DPRINT("Priming PL buffer for list 0...\n");
+      if (load_zero_gain_list(&G.list[0], SHUTDOWN_FLUSH_FRAMES)) {
+          G.cur_list = 0; G.next_list = 1; G.cur_frame = 0; G.playing = true;
+      }
+      pthread_mutex_unlock(&G.mtx);
+      while (g_list_status[0] != LIST_IDLE) { usleep(10000); }
+      DPRINT("PL buffer for list 0 primed.\n");
 
-  // Wait for player to finish list 0. This also confirms the player thread is working.
-  while (g_list_status[0] != LIST_IDLE) { usleep(10000); }
-  DPRINT("PL buffer for list 0 primed.\n");
-
-  // --- Flush List 1 ---
-  pthread_mutex_lock(&G.mtx);
-  DPRINT("Priming PL buffer for list 1...\n");
-  if (load_zero_gain_list(&G.list[1], SHUTDOWN_FLUSH_FRAMES)) {
-      G.cur_list = 1;
-      G.next_list = 0;
-      G.cur_frame = 0;
-      G.playing = true; // Start playing the second silent list
+      // --- Flush List 1 ---
+      pthread_mutex_lock(&G.mtx);
+      DPRINT("Priming PL buffer for list 1...\n");
+      if (load_zero_gain_list(&G.list[1], SHUTDOWN_FLUSH_FRAMES)) {
+          G.cur_list = 1; G.next_list = 0; G.cur_frame = 0; G.playing = true;
+      }
+      pthread_mutex_unlock(&G.mtx);
+      while (g_list_status[1] != LIST_IDLE) { usleep(10000); }
+      DPRINT("PL buffer for list 1 primed.\n");
   }
-  pthread_mutex_unlock(&G.mtx);
-  
-  // Wait for player to finish list 1
-  while (g_list_status[1] != LIST_IDLE) { usleep(10000); }
-  DPRINT("PL buffer for list 1 primed.\n");
   
   DPRINT("PL priming complete. Server is ready to accept connections.\n");
-  // At this point, player thread has finished both lists and set G.playing back to false.
-  // The server state is now clean and ready.
 
   // --- Now, proceed with setting up network listening ---
   g_listen_queue = socket(AF_INET, SOCK_STREAM, 0);
-  if (g_listen_queue < 0){ perror("[QSRV] socket"); return -1; }
+  if (g_listen_queue < 0){ DPRINT("socket() failed: %s\n", strerror(errno)); return -1; }
   int one=1;
   setsockopt(g_listen_queue, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
   struct sockaddr_in addr={0};
   addr.sin_family=AF_INET; addr.sin_addr.s_addr=htonl(INADDR_ANY); addr.sin_port=htons(port);
-  if (bind(g_listen_queue,(struct sockaddr*)&addr,sizeof(addr))<0){ perror("[QSRV] bind"); close(g_listen_queue); return -2; }
-  if (listen(g_listen_queue,1)<0){ perror("[QSRV] listen"); close(g_listen_queue); return -3; }
+  if (bind(g_listen_queue,(struct sockaddr*)&addr,sizeof(addr))<0){ DPRINT("bind() failed: %s\n", strerror(errno)); close(g_listen_queue); return -2; }
+  if (listen(g_listen_queue,1)<0){ DPRINT("listen() failed: %s\n", strerror(errno)); close(g_listen_queue); return -3; }
   if (pthread_create(&g_accept_thread_queue, NULL, accept_loop_queue, NULL) != 0) {
-      perror("[QSRV] pthread_create"); close(g_listen_queue); return -4;
+      DPRINT("pthread_create() failed: %s\n", strerror(errno)); close(g_listen_queue); return -4;
   }
   g_accept_thread_running = true;
   return 0;
@@ -615,40 +642,28 @@ void stop_queue_server(void){
 
     // --- Phase 1: Shut down network services and join the accept thread ---
     DPRINT("Stopping network services...\n");
-
-    // Set stop flag for accept_loop first, in case it's not blocked in accept()
     g_stop_queue = 1;
-
-    // Explicitly interrupt the accept() call with a signal
-    if (g_accept_thread_running) {
-        pthread_kill(g_accept_thread_queue, SIGUSR1);
+    if (g_listen_queue >= 0) {
+        shutdown(g_listen_queue, SHUT_RDWR); // Help unblock accept()
+        close(g_listen_queue);
+        g_listen_queue = -1;
     }
-    
-    // Shut down any active client connection
     if (g_active_client_fd >= 0) {
         shutdown(g_active_client_fd, SHUT_RDWR);
         close(g_active_client_fd);
         g_active_client_fd = -1;
     }
-
-    // Close the listening socket.
-    if (g_listen_queue >= 0){
-        close(g_listen_queue);
-        g_listen_queue = -1;
-    }
-    
-    // Now that the thread is unblocked and its resources are closed, join it.
     if (g_accept_thread_running) {
+        pthread_kill(g_accept_thread_queue, SIGUSR1); // Interrupt if still blocked
         pthread_join(g_accept_thread_queue, NULL);
         g_accept_thread_running = false;
     }
     DPRINT("Network services stopped.\n");
 
     // --- Phase 2: Flush PL buffers (player_thread is still running) ---
-    // Note: We leave g_stop_queue=1. The player thread will be controlled manually.
     DPRINT("Starting PL buffer flush.\n");
     if (G.player_thread_running) {
-        // ... (The PL flushing logic for list 0 and list 1 remains EXACTLY the same as before) ...
+        // --- Flush List 0 ---
         pthread_mutex_lock(&G.mtx);
         G.playing = false;
         clear_list_fully(&G.list[0]);
@@ -660,6 +675,7 @@ void stop_queue_server(void){
         while (g_list_status[0] != LIST_IDLE) { usleep(10000); }
         DPRINT("PL buffer for list 0 flushed.\n");
 
+        // --- Flush List 1 ---
         pthread_mutex_lock(&G.mtx);
         G.playing = false;
         clear_list_fully(&G.list[1]);
@@ -672,7 +688,6 @@ void stop_queue_server(void){
     }
 
     // --- Phase 3: Finally, join the player thread ---
-    // g_stop_queue is already 1, so the thread will exit after the flush.
     DPRINT("PL flush complete. Stopping player thread.\n");
     if (G.player_thread_running) {
         pthread_join(G.player_thread_h, NULL);
