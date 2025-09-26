@@ -127,7 +127,7 @@ def main():
 
         print("[CLIENT] Sending RESET...")
         op_Z_reset(s_control)
-        nframes = 100
+        nframes = 20
 
         # --- [MODIFIED] 1. Initial Priming using a single batch transfer ---
         for list_id_to_prime in [0, 1]:

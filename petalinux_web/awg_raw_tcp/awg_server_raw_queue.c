@@ -265,6 +265,7 @@ static void init_lists(){
   G.cur_list = 0; G.next_list = 1;
 }
 
+// --- [MODIFIED] player_thread to eliminate the 1ms gap during list switching ---
 static void *player_thread(void *arg){
     (void)arg;
     struct timespec ts;
@@ -277,7 +278,7 @@ static void *player_thread(void *arg){
         ts.tv_nsec += (long)us * 1000L;
         while (ts.tv_nsec >= 1000000000L){ ts.tv_nsec -= 1000000000L; ts.tv_sec++; }
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
-        
+
         pthread_mutex_lock(&G.mtx);
 
         if (!G.playing) {
@@ -289,28 +290,43 @@ static void *player_thread(void *arg){
         if (!current_list->ready || G.cur_frame >= current_list->total_frames) {
             int finished_list_idx = G.cur_list;
             awg_list_t *next_list = &G.list[G.next_list];
-            
+
             if (next_list->ready && next_list->total_frames > 0) {
                 DPRINT("Switching from list %d to %d\n", G.cur_list, G.next_list);
+                // Perform the switch
                 G.cur_list = G.next_list; 
                 G.next_list = finished_list_idx; 
                 G.cur_frame = 0;
+                // The list to be cleared is the *old* one
+                current_list = &G.list[G.cur_list]; // IMPORTANT: Update current_list pointer
             } else {
                 DPRINT("End of list %d, no next ready -> stopping.\n", finished_list_idx);
                 G.playing = false;
+                clear_list_fully(&G.list[finished_list_idx]);
+                pthread_mutex_unlock(&G.mtx);
+
+                pthread_mutex_lock(&g_notify_mutex);
+                g_list_status[finished_list_idx] = LIST_IDLE;
+                pthread_mutex_unlock(&g_notify_mutex);
+                send_status_update(finished_list_idx);
+                continue; // Stop playing
             }
-            clear_list_fully(current_list);
-            
-            pthread_mutex_unlock(&G.mtx);
-            
+
+            // Clean up the OLD list and send notification AFTER the switch
+            clear_list_fully(&G.list[G.next_list]); // G.next_list now holds the old list index
+            pthread_mutex_unlock(&G.mtx); // Unlock before notify
+
             pthread_mutex_lock(&g_notify_mutex);
             g_list_status[finished_list_idx] = LIST_IDLE;
             pthread_mutex_unlock(&g_notify_mutex);
             send_status_update(finished_list_idx);
-            continue;
+
+            pthread_mutex_lock(&G.mtx); // Re-lock to continue to the send logic below
         } 
-        
-        if (current_list->loaded_frames > G.cur_frame) {
+
+        // This logic will now be executed for the first frame of the new list
+        // in the same timeslice as the switch.
+        if (G.playing && current_list->loaded_frames > G.cur_frame) {
             uint32_t off = current_list->offsets[G.cur_frame];
             uint16_t cnt = current_list->counts[G.cur_frame];
             uint32_t *w  = &current_list->words[off];
@@ -325,10 +341,29 @@ static void *player_thread(void *arg){
     return NULL;
 }
 
+// --- [MODIFIED] start_player_if_needed with real-time priority setting ---
 static void start_player_if_needed(){
   if (!G.player_thread_running){
     DPRINT("Starting player thread...\n");
-    pthread_create(&G.player_thread_h, NULL, player_thread, NULL);
+    if (pthread_create(&G.player_thread_h, NULL, player_thread, NULL) != 0) {
+        DPRINT("ERROR: Failed to create player thread: %s\n", strerror(errno));
+        return;
+    }
+
+    // --- [NEW] Set thread to real-time priority ---
+    struct sched_param params;
+    
+    // Set a high priority (e.g., 98 out of a max of 99 for SCHED_FIFO)
+    params.sched_priority = 98; 
+    
+    // Use First-In, First-Out real-time scheduling policy
+    if (pthread_setschedparam(G.player_thread_h, SCHED_FIFO, &params) != 0) {
+        // This might fail if not run as root, but your server is.
+        DPRINT("WARNING: Failed to set real-time priority for player thread: %s\n", strerror(errno));
+    } else {
+        DPRINT("Player thread set to real-time priority %d with SCHED_FIFO.\n", params.sched_priority);
+    }
+    
     G.player_thread_running = true;
   }
 }
