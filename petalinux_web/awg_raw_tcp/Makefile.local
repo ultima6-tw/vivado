@@ -1,0 +1,33 @@
+# Makefile.local - Used on your development host to deploy source files to the FPGA board
+
+# --- Configuration for FPGA Board ---
+# (Replace with your actual FPGA board's user, IP, and destination directory)
+FPGA_USER = petalinux
+FPGA_IP = wavegenz7.local
+FPGA_DEST_DIR = /home/petalinux
+
+# --- Source Files to Deploy ---
+# List all your source (.c) and header (.h) files here that need to be on the FPGA board
+SRCS = awg_server_raw_top.c awg_server_raw_queue.c awg_server_raw_notify.c awg_server_raw_direct.c
+HDRS = awg_server_raw_shared.h awg_core.h
+SERV = awg_server.service
+# Add other necessary files, e.g., the onboard Makefile itself
+OTHER_FILES = Makefile.onboard
+
+# Combine all files to be deployed
+FILES_TO_DEPLOY = $(SRCS) $(HDRS) $(OTHER_FILES) $(SERV)
+
+.PHONY: deploy clean
+
+# The default target for this Makefile is 'deploy'
+all: deploy
+
+deploy:
+	ssh-keygen -R $(FPGA_IP)
+	@echo "Deploying source files to $(FPGA_USER)@$(FPGA_IP):$(FPGA_DEST_DIR)"
+	# Use scp to copy all specified files
+	scp $(FILES_TO_DEPLOY) $(FPGA_USER)@$(FPGA_IP):$(FPGA_DEST_DIR)/
+	@echo "Deployment to FPGA board complete. You can now SSH into the board and use Makefile.onboard."
+
+clean:
+	@echo "Local clean target for Makefile.local does nothing, as no local build artifacts are generated."

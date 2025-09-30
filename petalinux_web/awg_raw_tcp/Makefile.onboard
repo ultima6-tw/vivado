@@ -1,0 +1,112 @@
+# Makefile.onboard - Used directly on the FPGA board to compile the AWG server and manage its systemd service
+
+# --------------------
+#     Compiler & Tools
+# --------------------
+CC = gcc
+
+# --------------------
+#     Project Files
+# --------------------
+TARGET = awg_server
+SOURCES = awg_server_raw_top.c \
+          awg_server_raw_direct.c \
+          awg_server_raw_queue.c \
+          awg_server_raw_notify.c \
+          awg_core_mmap.c
+
+# Automatically generate object file names from source file names (e.g., source.c -> source.o)
+OBJECTS = $(SOURCES:.c=.o)
+
+# Systemd Service File
+SERVICE_FILE = awg_server.service
+SERVICE_INSTALL_PATH = /etc/systemd/system/$(SERVICE_FILE)
+
+# --------------------
+#     Compilation Flags
+# --------------------
+# Flags that are always used
+BASE_CFLAGS = -pthread -Wall
+LDFLAGS = -pthread
+
+# --- The DEBUG Switch Magic ---
+# By default, DEBUG is not set to 1, so it will build a Release version.
+# To build a Debug version, you run: make DEBUG=1
+CFLAGS = $(BASE_CFLAGS)
+ifeq ($(DEBUG), 1)
+    # Debug Mode: Add debugging symbols (-g) and the -DDEBUG macro
+    CFLAGS += -g -DDEBUG
+    INFO = (Debug Build)
+else
+    # Release Mode: Add optimizations (-O2) and strip symbols (-s) for a smaller executable
+    CFLAGS += -O2
+    LDFLAGS += -s
+    INFO = (Release Build)
+endif
+
+# --------------------
+#     Build & Service Rules
+# --------------------
+.PHONY: all clean install_service uninstall_service start_service stop_service restart_service status_service
+
+# Default target: build the executable
+all: $(TARGET)
+	@echo "--- Build successful for $(TARGET) $(INFO) ---"
+
+# Rule to link the object files into the final executable
+$(TARGET): $(OBJECTS)
+	@echo "Linking..."
+	$(CC) $^ -o $@ $(LDFLAGS)
+
+# Pattern rule to compile a .c source file into a .o object file
+%.o: %.c
+	@echo "Compiling $<..."
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Target to clean up compiled files
+clean:
+	@echo "Cleaning up..."
+	rm -f $(TARGET) $(OBJECTS)
+
+# Target to install the systemd service
+# Requires 'sudo make install_service'
+install_service: $(TARGET) $(SERVICE_FILE)
+	@echo "Installing systemd service '$(SERVICE_FILE)'..."
+	@echo "  -> Copying $(SERVICE_FILE) to $(SERVICE_INSTALL_PATH)"
+	sudo cp $(SERVICE_FILE) $(SERVICE_INSTALL_PATH)
+	@echo "  -> Reloading systemd daemon"
+	sudo systemctl daemon-reload
+	@echo "  -> Enabling service '$(TARGET)' to start on boot"
+	sudo systemctl enable $(TARGET)
+	@echo "Service installation complete. You can now 'sudo make start_service'."
+
+# Target to uninstall the systemd service
+# Requires 'sudo make uninstall_service'
+uninstall_service:
+	@echo "Uninstalling systemd service '$(SERVICE_FILE)'..."
+	@echo "  -> Stopping service '$(TARGET)'"
+	sudo systemctl stop $(TARGET) || true # Use '|| true' to prevent script from failing if service is already stopped
+	@echo "  -> Disabling service '$(TARGET)' from starting on boot"
+	sudo systemctl disable $(TARGET) || true
+	@echo "  -> Removing service file $(SERVICE_INSTALL_PATH)"
+	sudo rm -f $(SERVICE_INSTALL_PATH)
+	@echo "  -> Reloading systemd daemon"
+	sudo systemctl daemon-reload
+	@echo "Service uninstallation complete."
+
+# Convenience targets for service management
+start_service:
+	@echo "Starting service '$(TARGET)'..."
+	sudo systemctl start $(TARGET)
+
+stop_service:
+	@echo "Stopping service '$(TARGET)'..."
+	sudo systemctl stop $(TARGET)
+
+restart_service:
+	@echo "Restarting service '$(TARGET)'..."
+	sudo systemctl restart $(TARGET)
+
+status_service:
+	@echo "Checking status of service '$(TARGET)'..."
+	sudo systemctl status $(TARGET)
