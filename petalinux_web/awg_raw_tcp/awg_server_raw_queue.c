@@ -388,19 +388,101 @@ static void cancel_preload_and_mark_idle(int list_id) {
 }
 
 static void do_reset(){
-    DPRINT("RESET command received.\n");
+    DPRINT("RESET command received. Initiating synchronized zero-gain flush for both lists (silent until complete).\n");
+
     pthread_mutex_lock(&G.mtx);
-    G.playing=false; 
-    G.cur_list=0; 
-    G.next_list=1; 
-    G.cur_frame=0;
+    // 1. Stop current playback and fully clear all list data
+    G.playing = false; 
+    G.cur_frame = 0;
+
+    // Clear data and state for both lists, preparing to load zero-gain frames
     clear_list_fully(&G.list[0]);
     clear_list_fully(&G.list[1]);
-    pthread_mutex_unlock(&G.mtx);
-    
+    g_loading_in_progress[0] = false; // Ensure preload status is reset
+    g_loading_in_progress[1] = false;
+    pthread_mutex_unlock(&G.mtx); // Unlock because load_zero_gain_list will also use the mutex, and we need to wait for notifications
+
+    // Ensure the player_thread is running so it can process the subsequent zero-gain playback
+    start_player_if_needed(); 
+
+    // --- Phase 1: Flush List 0 with zero-gain frames ---
+    DPRINT("  -> Loading zero-gain frames into List 0.\n");
+    pthread_mutex_lock(&G.mtx); // Re-lock to operate on G.list
+    if (load_zero_gain_list(&G.list[0], SHUTDOWN_FLUSH_FRAMES)) {
+        G.cur_list = 0; // Start playback from List 0
+        G.next_list = 1; // List 1 is ready as the next
+        G.cur_frame = 0; // Start from the first frame of List 0
+        G.playing = true; // Start the player
+
+        // Update internal status, but do NOT send notifications to the client
+        pthread_mutex_lock(&g_notify_mutex);
+        g_list_status[0] = LIST_READY; // Internal status set to READY/PLAYING
+        g_list_status[1] = LIST_IDLE;  // Internal List 1 remains IDLE (waiting to be processed)
+        pthread_mutex_unlock(&g_notify_mutex);
+    } else {
+        DPRINT("ERROR: Failed to load zero-gain list 0 during RESET. Aborting.\n");
+        pthread_mutex_unlock(&G.mtx);
+        // If failed at this point, mark both as IDLE in the final step and return
+        pthread_mutex_lock(&g_notify_mutex);
+        g_list_status[0] = LIST_IDLE; g_list_status[1] = LIST_IDLE;
+        pthread_mutex_unlock(&g_notify_mutex);
+        // Do not call send_status_update here, will be handled at the end
+        return; 
+    }
+    pthread_mutex_unlock(&G.mtx); // Unlock, preparing to wait for notification
+
+    // Wait for List 0 to finish playback and become IDLE
+    DPRINT("  -> Waiting for List 0 to become IDLE (zero-gain flush).\n");
+    while (g_list_status[0] != LIST_IDLE && !g_stop_queue) {
+        usleep(10000); 
+    }
+    DPRINT("  -> List 0 zero-gain flush complete.\n");
+
+    // --- Phase 2: Flush List 1 with zero-gain frames ---
+    DPRINT("  -> Loading zero-gain frames into List 1.\n");
+    pthread_mutex_lock(&G.mtx); // Re-lock to operate on G.list
+    G.playing = false; // Ensure player_thread doesn't suddenly read from old List 1 before configuration
+    if (load_zero_gain_list(&G.list[1], SHUTDOWN_FLUSH_FRAMES)) {
+        G.cur_list = 1; // Set player to start from List 1
+        G.next_list = 0; // List 0 is now idle, serving as the next
+        G.cur_frame = 0; 
+        G.playing = true; // Restart the player
+        
+        // Update internal status, but do NOT send notifications to the client
+        pthread_mutex_lock(&g_notify_mutex);
+        g_list_status[0] = LIST_IDLE;   // Internal List 0 is now IDLE
+        g_list_status[1] = LIST_READY; // Internal List 1 status
+        pthread_mutex_unlock(&g_notify_mutex);
+    } else {
+        DPRINT("ERROR: Failed to load zero-gain list 1 during RESET. Aborting.\n");
+        pthread_mutex_unlock(&G.mtx);
+        // If failed at this point, mark both as IDLE in the final step and return
+        pthread_mutex_lock(&g_notify_mutex);
+        g_list_status[0] = LIST_IDLE; g_list_status[1] = LIST_IDLE;
+        pthread_mutex_unlock(&g_notify_mutex);
+        // Do not call send_status_update here, will be handled at the end
+        return;
+    }
+    pthread_mutex_unlock(&G.mtx); // Unlock, preparing to wait for notification
+
+    // Wait for List 1 to finish playback and become IDLE
+    DPRINT("  -> Waiting for List 1 to become IDLE (zero-gain flush).\n");
+    while (g_list_status[1] != LIST_IDLE && !g_stop_queue) {
+        usleep(10000);
+    }
+    DPRINT("  -> List 1 zero-gain flush complete.\n");
+
+    // --- Final internal state cleanup after both lists are flushed ---
+    pthread_mutex_lock(&G.mtx);
+    G.playing = false; // Ensure player stops after zero-gain frames are played
+    clear_list_fully(&G.list[0]); // Clear zero-gain List 0 (now it's IDLE)
+    clear_list_fully(&G.list[1]); // Clear zero-gain List 1 (now it's IDLE)
     g_loading_in_progress[0] = false;
     g_loading_in_progress[1] = false;
+    pthread_mutex_unlock(&G.mtx);
 
+    // --- ONLY NOW send the final IDLE notifications to the client ---
+    // This ensures the client receives IDLE status only after all zeroing operations are complete
     pthread_mutex_lock(&g_notify_mutex);
     g_list_status[0] = LIST_IDLE; 
     g_list_status[1] = LIST_IDLE;
@@ -408,6 +490,7 @@ static void do_reset(){
     
     send_status_update(0);
     send_status_update(1);
+    DPRINT("RESET command fully processed: both lists flushed and now truly IDLE. Notifications sent.\n");
 }
 
 static bool do_preload_begin(uint8_t list_id, uint32_t total_frames){
